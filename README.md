@@ -1,2 +1,2 @@
 # IMCCD
-In preparetion.
+In preparation.
