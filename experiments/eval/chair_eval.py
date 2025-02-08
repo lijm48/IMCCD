@@ -132,7 +132,8 @@ def eval_model(args):
             use_mask = args.use_mask,
             key_pos =key_pos,
             mask_mode = args.mask_mode,
-            input_ids_cd = input_ids_cd if args.use_icd else None)
+            input_ids_cd = input_ids_cd if args.use_icd else None,
+            tokenizer = tokenizer)
         
         
         

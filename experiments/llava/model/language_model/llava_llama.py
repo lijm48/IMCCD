@@ -29,6 +29,7 @@ from ..llava_arch import LlavaMetaModel, LlavaMetaForCausalLM
 import matplotlib.pyplot as plt
 from sklearn.mixture import GaussianMixture
 import numpy as np
+import spacy
 
 
 
@@ -55,6 +56,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         self.cnt2 = 0
         self.attn_maps = None
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.tagging = spacy.load("en_core_web_sm")
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -88,6 +90,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         qs: Optional[str] = "",
         label: Optional[str] = "",
         input_ids_cd: torch.LongTensor = None,
+        tokenizer = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (

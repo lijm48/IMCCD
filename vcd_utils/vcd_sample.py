@@ -104,6 +104,7 @@ def sample(
     mask_mode = model_kwargs.get("mask_mode")
     key_pos = model_kwargs.get("key_pos")
     use_key_pos = model_kwargs.get("use_key_pos")
+    tokenizer = model_kwargs.get("tokenizer")
     model_kwargs_cd = model_kwargs.copy()
     flag = 0
     flag2 = 0
@@ -238,6 +239,30 @@ def sample(
    
                     cd_beta = model_kwargs.get("cd_beta") if model_kwargs.get("cd_beta") is not None else 0.1
                     
+                    use_entropy = False
+                    if use_entropy:
+                        next_prob_cd = nn.functional.softmax(next_token_logits_cd, dim=-1)
+                        epsilon = 1e-6
+                        entropy = -torch.sum(next_prob_cd * torch.log(next_prob_cd + epsilon), dim =1)
+                        cd_alpha = 5 * entropy
+                    if tokenizer:
+                        next_logits = logits_processor(input_ids, next_token_logits)
+                        next_logits= logits_warper(input_ids, next_logits)
+                        next_probs = nn.functional.softmax(next_logits, dim=-1)
+                        next_tokens = torch.multinomial(next_probs, num_samples=1).squeeze(1)
+                        next_word = tokenizer.decode(next_tokens)
+                        # tokenizer.batch_decode(input_ids)
+                        doc = self.tagging(next_word)
+                        # valid_list = ["NOUN", "PROPN", "ADD"] #, "ADJ"]
+                        # import pdb;pdb.set_trace()
+                        valid_list = ["NOUN", "PROPN"]
+                        # valid_list = ["NOUN", "PROPN", "ADJ", "NUM", "VERB"]
+                        if len(doc) < 1:
+                            cd_alpha = 0
+                        elif '.' in  next_word or ',' in next_word:
+                            cd_alpha = 0
+                        elif doc[0].pos_ not in valid_list:
+                            cd_alpha = 0
                     # version 1  set cutoff for Adaptive Plausibility Constraints
                     # probs = nn.functional.softmax(next_token_logits, dim=-1)
                     # cutoff = cd_beta * probs.max(dim=-1, keepdim=True).values
