@@ -344,6 +344,19 @@ conv_llava_v1 = Conversation(
     sep2="</s>",
 )
 
+
+conv_llava_v1_wt_sys = Conversation(
+    system="",
+    roles=("USER", "ASSISTANT"),
+    version="v1",
+    messages=(),
+    offset=0,
+    sep_style=SeparatorStyle.TWO,
+    sep=" ",
+    sep2="</s>",
+)
+
+
 conv_llava_v1_mmtag = Conversation(
     system="A chat between a curious user and an artificial intelligence assistant. "
            "The assistant is able to understand the visual content that the user provides, and assist the user with a variety of tasks using natural language."
@@ -374,6 +387,8 @@ conv_templates = {
     "llava_llama_2": conv_llava_llama_2,
 
     "mpt": conv_mpt,
+    
+    "llava_v1_wt_sys": conv_llava_v1_wt_sys
 }
 
 

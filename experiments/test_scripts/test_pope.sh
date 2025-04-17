@@ -18,7 +18,7 @@ results_file="${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}_${
 
 echo ${results_file}
 python ./eval/eval_pope.py \
---gen_files ./output/${dataset_name}/${type}/${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}.jsonl \
+--gen_files ./output/${dataset_name}/${type}/${results_file} \
 --gt_files data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json
 
 

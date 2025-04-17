@@ -117,13 +117,13 @@ def eval_model(args):
         # import pdb;pdb.set_trace()
 
         key_pos = [{"image_token_start": image_token_indices,  "image_token_end": image_token_indices + 1 - len_input_ids}]
-        output_ids = model.generate(
-            input_ids,
+        
+        generate_args = dict(
+            inputs=input_ids,
             images=image_tensor.unsqueeze(0).half().cuda(),
             images_cd=(image_tensor_cd.unsqueeze(0).half().cuda() if image_tensor_cd is not None else None),
             cd_alpha = args.cd_alpha,
             cd_beta = args.cd_beta,
-            do_sample=True,
             temperature=args.temperature,
             top_p=args.top_p,
             top_k=args.top_k,
@@ -143,6 +143,7 @@ def eval_model(args):
         elif args.sampling == 'beam_search':
             generate_args.update(do_sample=False, num_beams=args.num_beams)
         
+        output_ids = model.generate(**generate_args)
         
         input_token_len = input_ids.shape[1]
         n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
@@ -186,6 +187,9 @@ if __name__ == "__main__":
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
+    
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

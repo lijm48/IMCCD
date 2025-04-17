@@ -91,11 +91,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         label: Optional[str] = "",
         input_ids_cd: torch.LongTensor = None,
         tokenizer = None,
-<<<<<<< HEAD
-=======
         sample_id: Optional[int] = 0,
         gamma: Optional[float] = 0,
->>>>>>> 11d7567... update
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -121,6 +118,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             adaptive_mask = True
             tmp_past_attns = past_attns
             modi_pos = modi_pos
+        # import pdb;pdb.set_trace()
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,

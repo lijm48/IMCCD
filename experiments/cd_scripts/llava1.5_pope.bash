@@ -62,12 +62,14 @@ CUDA_VISIBLE_DEVICES=0 python ./eval/object_hallucination_vqa_llava.py \
 --model-path ${model_path} \
 --question-file ./data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json \
 --image-folder ${image_folder} \
---answers-file ./output/${dataset_name}/${type}/llava15_${dataset_name}_pope_${type}_answers_${mask_mode}_imccd_seed${seed}_${sampling}.jsonl \
+--answers-file ./output/${dataset_name}/${type}/llava15_${dataset_name}_pope_${type}_answers_${mask_mode}_seed${seed}_${sampling}.jsonl \
 --cd_alpha $cd_alpha \
 --cd_beta $cd_beta \
 --use_cd \
 --use_mask \
 --mask_mode  imccd \
 --noise_step $noise_step \
---seed ${seed}
+--seed ${seed} \
+--sampling ${sampling} \
+--use_kvcache
 
