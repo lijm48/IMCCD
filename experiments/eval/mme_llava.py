@@ -56,21 +56,23 @@ def eval_model(args):
 
         conv = conv_templates[args.conv_mode].copy()
         #import pdb; pdb.set_trace()
+        # conv.append_message(conv.roles[0], qs)
         conv.append_message(conv.roles[0], qs + " Please answer this question with one word.")
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
         # import pdb;pdb.set_trace()
         
-        conv_cd = conv_templates[args.conv_mode].copy()
-        conv_cd.system = "You are a confused object detector."
-        # import pdb; pdb.set_trace()
-        conv_cd.append_message(conv.roles[0], qs)
-        conv_cd.append_message(conv.roles[1], None)
-        prompt_cd = conv_cd.get_prompt()
+        if args.use_icd:
+            conv_cd = conv_templates[args.conv_mode].copy()
+            conv_cd.system = "You are a confused object detector."
+            # conv_cd.append_message(conv.roles[0], qs)
+            conv_cd.append_message(conv.roles[0], qs + " Please answer this question with one word.")
+            conv_cd.append_message(conv.roles[1], None)
+            prompt_cd = conv_cd.get_prompt()
+            input_ids_cd = tokenizer_image_token(prompt_cd, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
         # import pdb; pdb.set_trace()
 
         input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
-        input_ids_cd = tokenizer_image_token(prompt_cd, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda()
         #  v
         _, image_token_indices = torch.where(input_ids  == IMAGE_TOKEN_INDEX)
         _, in_indices = torch.where(input_ids  == 297)
@@ -103,24 +105,33 @@ def eval_model(args):
 
         # with torch.inference_mode():
         # import pdb;pdb.set_trace()
+        with torch.inference_mode():
+            generate_args = dict(
+                inputs=input_ids,
+                images=image_tensor.unsqueeze(0).half().cuda(),
+                images_cd=(image_tensor_cd.unsqueeze(0).half().cuda() if image_tensor_cd is not None else None),
+                cd_alpha = args.cd_alpha,
+                cd_beta = args.cd_beta,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                max_new_tokens=64,
+                use_cache=True,
+                use_mask = args.use_mask,
+                mask_mode = args.mask_mode,
+                key_pos =key_pos,
+                qs = line["text"],
+                input_ids_cd = input_ids_cd if args.use_icd else None,
+            )
+            if args.sampling == 'sample':
+                generate_args.update(do_sample=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
 
-        output_ids = model.generate(
-            input_ids,
-            images=image_tensor.unsqueeze(0).half().cuda(),
-            images_cd=(image_tensor_cd.unsqueeze(0).half().cuda() if image_tensor_cd is not None else None),
-            cd_alpha = args.cd_alpha,
-            cd_beta = args.cd_beta,
-            do_sample=True,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            max_new_tokens=1024,
-            use_cache=True,
-            use_mask = args.use_mask,
-            mask_mode = args.mask_mode,
-            key_pos =key_pos,
-            qs = line["text"],
-            input_ids_cd = input_ids_cd if args.use_icd else None)
+            output_ids = model.generate(**generate_args)
 
         input_token_len = input_ids.shape[1]
         n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
@@ -163,6 +174,8 @@ if __name__ == "__main__":
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

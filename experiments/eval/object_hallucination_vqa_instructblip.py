@@ -35,9 +35,11 @@ def eval_model(args):
     # Model
     disable_torch_init()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_path = os.path.expanduser(args.model_path)
     # loads InstructBLIP model
     # For large_sized model,
     model, vis_processors, _ = load_model_and_preprocess(name="blip2_vicuna_instruct", model_type="vicuna7b", is_eval=True, device=device)
+    # model, vis_processors, _ = load_model_and_preprocess(name="blip2_vicuna_instruct", model_type="vicuna7b", is_eval=True, device=device)
 
     questions = [json.loads(q) for q in open(os.path.expanduser(args.question_file), "r")]
     answers_file = os.path.expanduser(args.answers_file)
@@ -53,18 +55,37 @@ def eval_model(args):
         # prepare the image
         image_tensor = vis_processors["eval"](raw_image).unsqueeze(0).to(device)
         ## create a white image for contrastive decoding
-        if args.use_cd:
+        if args.use_icd:
+            image_tensor_cd = image_tensor
+        elif args.use_cd:
             image_tensor_cd = add_diffusion_noise(image_tensor, args.noise_step)
         else:
-            image_tensor_cd = None      
-
-        with torch.inference_mode():
-            outputs = model.generate({"image": image_tensor, "prompt": prompt},
-                use_nucleus_sampling=True, num_beams=1,
-                top_p = args.top_p, repetition_penalty=1,
-                images_cd=image_tensor_cd, cd_beta = args.cd_beta, cd_alpha = args.cd_alpha,
-                use_mask = args.use_mask, mask_mode = args.mask_mode)
-
+            image_tensor_cd = None    
+        with torch.inference_mode():    
+            generate_args = dict(
+                samples={"image": image_tensor, "prompt": prompt},
+                num_beams=1,
+                top_p = args.top_p,
+                repetition_penalty=1,
+                cd_alpha = args.cd_alpha,
+                cd_beta = args.cd_beta,
+                temperature=args.temperature,
+                use_mask = args.use_mask,
+                mask_mode = args.mask_mode,
+                images_cd=image_tensor_cd,
+                use_icd = args.use_icd,
+            )
+            
+            if args.sampling == 'sample':
+                generate_args.update(use_nucleus_sampling=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                    generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            else:
+                import pdb;pdb.set_trace()
+            outputs = model.generate(**generate_args)
         outputs = outputs[0]
         ans_file.write(json.dumps({"question_id": idx,
                                    "prompt": prompt,
@@ -92,11 +113,14 @@ if __name__ == "__main__":
 
     parser.add_argument("--noise_step", type=int, default=500)
     parser.add_argument("--use_cd", action='store_true', default=False)
+    parser.add_argument("--use_icd", action='store_true', default=False)
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_mask", action='store_true', default=False)
     parser.add_argument("--mask_mode", type=str, default="gradient")
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

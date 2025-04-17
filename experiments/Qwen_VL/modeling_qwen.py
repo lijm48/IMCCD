@@ -248,6 +248,198 @@ class QWenAttention(nn.Module):
         new_shape = tensor.size()[:-2] + (num_heads * attn_head_size,)
         return tensor.view(new_shape)
 
+    def _modi_pos2(self, position_ids, key_pos, use_past = False):
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        interval = 0
+        origin_position_ids = position_ids.clone()
+        
+        if use_past:
+            position_ids = position_ids * self.scaling_factor
+            position_ids =  position_ids - (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) + interval
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids = position_ids * self.scaling_factor
+            # import pdb;pdb.set_trace()
+            position_ids[:, image_token_end - interval:] = position_ids[:, image_token_end - interval:] -  (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) + interval 
+            position_ids[:, image_token_start:image_token_end] = self.scaling_factor2 * origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- self.scale_factor2) * origin_position_ids[:, image_token_start]
+        
+        return position_ids
+    
+    def _modi_pos(self, position_ids=None, key_pos=None, use_past=False):
+        # modify pos embed
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        if use_past:
+            position_ids = position_ids - image_token_end + image_token_start + 1
+        
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids[:, image_token_end:] = position_ids[:, image_token_end:] - position_ids[:, image_token_end-1: image_token_end] + position_ids[:, image_token_start:image_token_start+1]
+            
+            position_ids[:, image_token_start:image_token_end] = position_ids[:, image_token_start].unsqueeze(1)
+
+        return position_ids
+
+    def _modi_pos_low_angle(self, position_ids, key_pos, use_past = False):
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        origin_position_ids = position_ids.clone()
+        
+        if use_past:
+            position_ids = position_ids * self.scaling_factor
+            position_ids =  position_ids - (self.scaling_factor- 1) * (image_token_end - image_token_start) 
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids = position_ids * self.scaling_factor
+            # import pdb;pdb.set_trace()
+            position_ids[:, image_token_end :] = position_ids[:, image_token_end :] -  (self.scaling_factor - 1) * (image_token_end - image_token_start) 
+            position_ids[:, image_token_start:image_token_end] =  origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- 1) * origin_position_ids[:, image_token_start]
+        
+        return position_ids
+    
+    def _GMM_mask(self, saliency, keys = None, trim=False, head_wise=False, token_wise=False, high_thres=False, low_thres=False):
+        data = saliency
+        if trim:
+            lower_triangular = torch.tril(data)
+            mean = torch.mean(lower_triangular[lower_triangular != 0])
+            std = torch.std(lower_triangular[lower_triangular != 0])
+        else:
+            if head_wise:
+                mean = torch.mean(data, dim = (0, 2, 3), keepdim = True)
+                std = torch.std(data, dim = (0, 2, 3), keepdim = True)
+            elif token_wise:
+                mean = torch.mean(data, dim = (0, 1, 3), keepdim = True)
+                std = torch.std(data, dim = (0, 1, 3), keepdim = True)          
+            else:
+                mean = torch.mean(data)
+                std = torch.std(data)
+        if high_thres:
+            thres = mean + 2 * std
+        elif low_thres:
+            thres = mean - std
+        else:
+            thres = mean
+
+        mask = (saliency > thres).float()
+        mask2 = (saliency.mean(dim=(1,2), keepdim = True) < thres + 2 * std).float()
+        # keys_norm = torch.norm(keys, dim = -1)
+        # keys_mean = torch.mean(keys_norm )
+        # keys_std = torch.std(keys_norm)
+        # # import pdb;pdb.set_trace()
+        # mask2 = (keys_norm >  keys_mean - 4 * keys_std).unsqueeze(2)
+        mask = mask * mask2
+        # import pdb;pdb.set_trace()
+        return mask, mean, std 
+    
+    # def _GMM_mask(self, saliency, trim = False, head_wise = False, token_wise = False, high_thres = False):
+    #     # data = saliency.cpu().numpy()
+    #     data = saliency
+    #     if trim:
+    #         lower_triangular = torch.tril(data)
+    #         mean = torch.mean(lower_triangular[lower_triangular != 0])
+    
+    #         std = torch.std(lower_triangular[lower_triangular != 0])
+    #     else:
+    #         if head_wise:
+    #             mean = torch.mean(data, dim = (0, 2, 3), keepdim = True)
+    #             std = torch.std(data, dim = (0, 2, 3), keepdim = True)
+    #         elif token_wise:
+    #             mean = torch.mean(data, dim = (0, 1, 3), keepdim = True)
+    #             std = torch.std(data, dim = (0, 1, 3), keepdim = True)          
+    #         else:
+    #             mean = torch.mean(data)
+    #             std = torch.std(data)
+    #     if high_thres:
+    #         thres = mean + 2 * std 
+    #     else:
+    #         thres = mean 
+    #     # import pdb;pdb.set_trace()
+       
+    #     mask = (saliency > thres).float()
+        
+    #     mask2 = (saliency.mean(dim=(1,2), keepdim = True) < thres + 2 * std).float()
+    #     mask = mask * mask2
+    #     return mask, mean, std
+    
+    def _estimate_attention_without_pos(self, query_states, key_states, attention_mask = None):
+        if self.use_logn_attn and not self.training:
+            if self.logn_tensor.device != query_states.device or self.logn_tensor.dtype != query_states.dtype:
+                self.logn_tensor = self.logn_tensor.to(query_states.device).type_as(query_states)
+            seq_start = key_states.size(1) - query_states.size(1)
+            seq_end = key_states.size(1)
+            logn_tensor = self.logn_tensor[:, seq_start:seq_end, :, :]
+            query_states = query_states * logn_tensor.expand_as(query_states)
+         
+        query_states = query_states.permute(0, 2, 1, 3)
+        key_states = key_states.permute(0, 2, 1, 3)
+
+        attn_weights = torch.matmul(query_states, key_states.transpose(-1, -2))
+
+        if self.scale_attn_weights:
+            attn_weights = attn_weights / torch.full(
+                [],
+                query_states.size(-1) ** 0.5,   # value is somehow correct in some strict way
+                dtype=attn_weights.dtype,
+                device=attn_weights.device,
+            )
+
+        if attention_mask is not None:
+            attn_weights = attn_weights + attention_mask  
+        return attn_weights
+
+    def _values_noise_multiply(self, attn_weights, key_pos, value_states, attn_weights_all = None, zero_noise = True, use_past = False, accel = True, key_states =None):
+        
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        
+        if zero_noise:
+            if accel:
+                mean = value_states[:, :, image_token_start:image_token_end].mean(dim=(2,3), keepdim = True).squeeze(3)
+                noise_value_states = mean.repeat(1, 1, attn_weights.shape[2])
+            else:
+                mean = value_states[:, :, image_token_start:image_token_end].mean(dim=(2,3), keepdim = True)
+                noise_value_states = mean.repeat(1, 1, value_states.shape[2],value_states.shape[3])
+        else:
+            noise_value_states = self.add_diffusion_noise(value_states.clone(), 999, 0.01)     
+        
+        if use_past:
+            img_attn = attn_weights[:, :, :, image_token_start:image_token_end]
+        else:
+            img_attn = attn_weights_all[:, :, image_token_end:, image_token_start:image_token_end]
+        mask, mean, std = self._GMM_mask(img_attn, keys = key_states[:, :, image_token_start:image_token_end ])  # mask掉异常值
+         
+        tmp_attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32) 
+        final_mask = torch.zeros_like(tmp_attn_weights)
+        
+        if use_past:
+            final_mask[:, :, :, image_token_start:image_token_end] = final_mask[:, :, :, image_token_start:image_token_end] + mask[:, :, -final_mask.shape[2]:]
+        else:
+            final_mask[:, :, image_token_end:, image_token_start:image_token_end] = final_mask[:, :, image_token_end:, image_token_start:image_token_end] + mask
+
+        tmp_attn_weights = tmp_attn_weights.to(value_states.dtype) 
+        final_mask = final_mask.to(value_states.dtype)
+        attn_output_ori = torch.matmul(tmp_attn_weights  * (1 - final_mask), value_states)
+        if zero_noise and accel:
+            attn_output_noise = ((tmp_attn_weights * final_mask).sum(dim = 3) * noise_value_states).unsqueeze(3).repeat(1, 1, 1,value_states.shape[3])
+        else:
+            attn_output_noise = torch.matmul(tmp_attn_weights * final_mask, noise_value_states)
+        final_attn = attn_output_ori + attn_output_noise
+        return final_attn, final_mask
+
+
     def forward(
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
@@ -269,7 +461,8 @@ class QWenAttention(nn.Module):
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
-
+       
+        
         if rotary_pos_emb is not None:
             cur_len = query.shape[1]
             rotary_pos_emb = [i[:, -cur_len:, :, :] for i in rotary_pos_emb]
@@ -279,6 +472,7 @@ class QWenAttention(nn.Module):
             query = apply_rotary_pos_emb(query, q_pos_emb)
             key = apply_rotary_pos_emb(key, k_pos_emb)
 
+<<<<<<< HEAD
         if layer_past is not None:
             past_key, past_value = layer_past[0], layer_past[1]
             key = torch.cat((past_key, key), dim=1)
@@ -288,6 +482,73 @@ class QWenAttention(nn.Module):
             present = (key, value)
         else:
             present = None
+=======
+            rotary_pos_emb_scaled = (rotary_pos_emb_scaled,) * 2
+            q_pos_emb_scaled, k_pos_emb_scaled = rotary_pos_emb_scaled
+            
+
+            if modi_pos:
+                try:
+                    image_token_start = key_pos[0]['image_token_start']
+                    image_token_end = key_pos[0]['image_token_end']
+                except:
+                    import pdb;pdb.set_trace()  
+                if low_angle:
+                    tmp_position_ids = self._modi_pos_low_angle(position_ids.clone(), key_pos, use_past = layer_past is not None)
+                    #tmp_position_ids = self._modi_pos2(position_ids.clone(), key_pos, use_past = layer_past is not None)
+                    # tmp_position_ids =  position_ids.clone()
+                    # import pdb;pdb.set_trace()
+                    tmp_query_states = apply_rotary_pos_emb(query.clone(), q_pos_emb_scaled, tmp_position_ids)
+                    tmp_key_states = apply_rotary_pos_emb(key.clone(), k_pos_emb_scaled, tmp_position_ids)
+
+                else:
+                    tmp_position_ids = self._modi_pos(position_ids.clone(), key_pos, use_past = layer_past is not None)
+                    tmp_query_states = apply_rotary_pos_emb(query.clone(), q_pos_emb, tmp_position_ids)
+                    tmp_key_states = apply_rotary_pos_emb(key.clone(), k_pos_emb, tmp_position_ids)
+                if layer_past is not None:
+                    # reuse k, v, self_attention
+
+                    tmp_key_states = torch.cat([layer_past_without_pos[0].permute(0, 2, 1, 3), tmp_key_states], dim=1)  # (bsz, seq_len, num_head, num_dim)
+
+                if accel:
+                    tmp_image_key_states = tmp_key_states[:, image_token_start-1:image_token_end+1]
+                    if layer_past is None:
+                        tmp_query_states2 = tmp_query_states[:, image_token_end+1:]
+                    else:
+                        # import pdb;pdb.set_trace()
+                        tmp_query_states2 = tmp_query_states
+                    attn_weights_with_modi_pos = self._estimate_attention_without_pos(tmp_query_states2, tmp_image_key_states)
+                else:
+                    attn_weights_with_modi_pos = self._estimate_attention_without_pos(tmp_query_states, tmp_key_states, attention_mask)
+            
+            # if modi_pos:
+            # # Slice the pos emb for current inference
+            #     query = tmp_query_states
+            #     key = tmp_key_states
+            # else:
+            query = apply_rotary_pos_emb(query, q_pos_emb, position_ids)
+            key = apply_rotary_pos_emb(key, k_pos_emb, position_ids)
+
+
+
+            if modi_pos:
+                attn_weights_all = attn_weights_with_modi_pos.clone()
+            else:
+                attn_weights_all = None
+
+        use_past = False
+        if layer_past is not None:
+            past_key, past_value = layer_past[0], layer_past[1]
+
+            key = torch.cat((past_key.permute(0, 2, 1, 3), key), dim=1)
+            value = torch.cat((past_value.permute(0, 2, 1, 3), value), dim=1)
+            use_past = True
+        
+        # KV Cache
+        present = (key.permute(0, 2, 1, 3), value.permute(0, 2, 1, 3)) if use_cache else None   # (bsz, num_head, seq_len, num_dim) cache
+        if modi_pos:
+            present_without_pos = (tmp_key_states.permute(0, 2, 1, 3), value.permute(0, 2, 1, 3)) if use_cache else None
+>>>>>>> 11d7567... update
 
         if self.use_logn_attn and not self.training:
             if self.logn_tensor.device != query.device or self.logn_tensor.dtype != query.dtype:
@@ -300,9 +561,122 @@ class QWenAttention(nn.Module):
         query = query.permute(0, 2, 1, 3)
         key = key.permute(0, 2, 1, 3)
         value = value.permute(0, 2, 1, 3)
+<<<<<<< HEAD
         attn_output, attn_weight = self._attn(
             query, key, value, registered_causal_mask, attention_mask, head_mask
         )
+=======
+
+        # TODO: add the logical about the IMCCD
+        # here we copy the function of `_attn` and modify the
+        # process logic accordingly
+
+        # ---------- Origianl logic ---------- #
+        # attn_output, attn_weight = self._attn(
+        #     query, key, value, registered_causal_mask, attention_mask, head_mask
+        # )
+        # attn_weights = nn.functional.softmax(attn_weights, dim=-1)
+
+        # attn_weights = attn_weights.type(value.dtype)
+        # attn_weights = self.attn_dropout(attn_weights)
+
+        # if head_mask is not None:
+        #     attn_weights = attn_weights * head_mask
+
+        # attn_output = torch.matmul(attn_weights, value)
+        # attn_output = attn_output.transpose(1, 2)
+        # ---------- Origianl logic ---------- #
+
+        # ---------- IMCCD part ------------- #
+        attn_weights = torch.matmul(query, key.transpose(-1, -2))
+
+        if self.scale_attn_weights:
+            attn_weights = attn_weights / torch.full(
+                [],
+                value.size(-1) ** 0.5,
+                dtype=attn_weights.dtype,
+                device=attn_weights.device,
+            )
+
+        if adaptive_mask:
+            # update the cached attention mask
+            if use_past:
+                assert past_attns is not None 
+                
+                if attn_weights.shape[3] == past_attns.shape[3] + 1:
+                    tmp_attn = torch.zeros(1, past_attns.shape[1], past_attns.shape[2], 1).to(attn_weights.device)
+                    tmp_attn = torch.cat((past_attns[layer_idx:layer_idx+1], tmp_attn ), dim = 3)
+                    attn_weights_all = torch.cat((tmp_attn.repeat(attn_weights.size(0), 1, 1, 1), attn_weights), dim = 2)
+                else:
+                    try:
+                        attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1], attn_weights), dim = 2)
+                    except:
+                        # in case of the beam search (beam size > 1)
+                        try:
+                            if past_attns.size(0) != attn_weights.size(0):
+                                attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1].repeat(attn_weights.size(0), 1, 1, 1), attn_weights), dim = 2)
+                        except:
+                            import pdb;pdb.set_trace()
+        
+        # causal_mask = self.bias[
+        #     :, :, key_length - query_length : key_length, :key_length
+        # ]
+        # mask_value = torch.finfo(attn_weights.dtype).min
+        # mask_value = torch.full([], mask_value, dtype=attn_weights.dtype).to(
+        #     attn_weights.device
+        # )
+        # attn_weights = torch.where(
+        #     causal_mask, attn_weights.to(attn_weights.dtype), mask_value
+        # )
+        attn_weights = attn_weights + attention_mask
+
+        ### IMCCD - CADAR
+        try:
+            image_token_start = key_pos[0]['image_token_start'] -1
+            image_token_end = key_pos[0]['image_token_end'] + 1
+        except:
+            import pdb;pdb.set_trace()  
+
+        if modi_pos:
+           
+            if use_past:
+                if accel:
+                    attn_diff =  attn_weights_with_modi_pos
+                else:
+                    attn_diff =  attn_weights_with_modi_pos[:, :, :, image_token_start:image_token_end]
+                if low_angle:
+                    attn_weights[:, :, :, image_token_start:image_token_end] = attn_diff
+                else:
+                    attn_weights[:, :, :, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, :, image_token_start:image_token_end] + gamma * attn_diff
+            else:
+                if accel:
+                    attn_diff =  attn_weights_with_modi_pos
+                else:
+                    attn_diff =  attn_weights_with_modi_pos[:, :, image_token_end:, image_token_start:image_token_end]
+                if low_angle:
+                    attn_weights[:, :, image_token_end:, image_token_start:image_token_end] =  attn_diff
+                else:
+                    attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff       
+      
+
+        if not use_past or not adaptive_mask:
+            attn_weights_all = attn_weights.clone()
+        else:
+            attn_weights_all[:, :, -attn_weights.shape[2]:] = attn_weights
+
+        ### IMCCD - mitigate the cross-modal spurious correlation
+        # upcast attention to fp32
+        if adaptive_mask:                
+            attn_output, final_mask = self._values_noise_multiply(attn_weights, key_pos, value,  attn_weights_all = attn_weights_all, use_past = use_past, accel = accel, key_states = key)
+        else:
+            attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query.dtype)
+            attn_output = torch.matmul(attn_weights, value)        
+        
+        attn_output = attn_output.transpose(1, 2)
+
+        # ---------- IMCCD part -------------#
+
+>>>>>>> 11d7567... update
         context_layer = self._merge_heads(
             attn_output, self.num_heads, self.head_dim
         )
@@ -367,7 +741,6 @@ class QWenBlock(nn.Module):
         output_attentions: Optional[bool] = False,
     ):
         layernorm_output = self.ln_1(hidden_states)
-
         attn_outputs = self.attn(
             layernorm_output,
             rotary_pos_emb,
@@ -683,6 +1056,15 @@ class QWenModel(QWenPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
+<<<<<<< HEAD
+=======
+            if layer_past is not None and i < len(past_key_values_without_pos):
+                
+                layer_past_without_pos = past_key_values_without_pos[i] 
+            else:
+                layer_past_without_pos = None                
+
+>>>>>>> 11d7567... update
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -704,6 +1086,12 @@ class QWenModel(QWenPreTrainedModel):
                     encoder_attention_mask,
                 )
             else:
+<<<<<<< HEAD
+=======
+                if not low_angle and i > 5:
+                    modi_pos = False
+
+>>>>>>> 11d7567... update
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
@@ -816,7 +1204,38 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             if past_key_values:
                 position_ids = position_ids[:, -1].unsqueeze(-1)
         else:
+<<<<<<< HEAD
             position_ids = None
+=======
+            model_inputs = {"input_ids": input_ids}
+
+        model_inputs.update(
+            {
+                "past_key_values": past_key_values,
+                "past_key_values_without_pos": past_key_values_without_pos,
+                "use_cache": kwargs.get("use_cache"),
+                "attention_mask": attention_mask,
+                "token_type_ids": token_type_ids,
+                "images": kwargs.get("images", None)
+            }
+        )
+        return model_inputs
+
+    def prepare_inputs_for_generation_cd(
+        self, input_ids, past_num=1, past_key_values=None, past_key_values_without_pos=None, inputs_embeds=None, key_pos_new = [], use_mask = False, use_kvcache = False, **kwargs
+    ):  
+        if not use_kvcache:
+            past_key_values = None
+            past_key_values_without_pos = None
+
+        token_type_ids = kwargs.get("token_type_ids", None)
+        if past_key_values:
+            input_ids = input_ids[:, -past_num:]
+            if token_type_ids is not None:
+                token_type_ids = token_type_ids[:, -past_num:]
+
+        attention_mask = kwargs.get("attention_mask", None)
+>>>>>>> 11d7567... update
 
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
@@ -860,6 +1279,27 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
+<<<<<<< HEAD
+=======
+
+        with torch.no_grad():
+            if len(key_pos) == 0:
+                _, bos_pos_ind = torch.where(input_ids == self.config.visual['image_start_id'])
+                _, eos_pos_ind = torch.where(input_ids == self.config.visual['image_start_id'] + 1)
+                key_pos = [{"image_token_start": bos_pos_ind.to(input_ids.device) + 1,  "image_token_end": eos_pos_ind.to(input_ids.device)}]
+                
+            if past_key_values is not None:
+                attention_mask = torch.ones((attention_mask.shape[0], past_key_values[-1][-1].shape[-2] + input_ids.shape[1]), dtype=attention_mask.dtype, device=attention_mask.device)
+        adaptive_mask = False
+        tmp_past_attns = None
+        if mask_mode == "ved":
+            adaptive_mask = True
+            tmp_past_attns = past_attns
+        if mask_mode == "imccd":
+            adaptive_mask = True
+            tmp_past_attns = past_attns
+            modi_pos = modi_pos
+>>>>>>> 11d7567... update
 
         transformer_outputs = self.transformer(
             input_ids,

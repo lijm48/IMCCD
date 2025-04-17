@@ -127,6 +127,26 @@ class LlamaRotaryEmbedding(torch.nn.Module):
         )
 
 
+class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
+    """LlamaRotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
+
+    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
+        self.scaling_factor = scaling_factor
+        super().__init__(dim, max_position_embeddings, base, device)
+
+    def _set_cos_sin_cache(self, seq_len, device, dtype):
+        self.max_seq_len_cached = seq_len
+        t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        t = t / self.scaling_factor
+
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        # Different from paper, but it uses a different permutation in order to obtain the same calculation
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
+        self.register_buffer("sin_cached", emb.sin()[None, None, :, :].to(dtype), persistent=False)
+
+
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
@@ -182,6 +202,9 @@ class LlamaAttention(nn.Module):
         self.v_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
         self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
+        self.scaling_factor = 3
+        self.scaling_factor2 = 2
+        self.rotary_emb2 = LlamaLinearScalingRotaryEmbedding(self.head_dim , max_position_embeddings=self.max_position_embeddings, scaling_factor =self.scaling_factor )
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -325,6 +348,48 @@ class LlamaAttention(nn.Module):
             position_ids[:, image_token_start:image_token_end] = position_ids[:, image_token_start].unsqueeze(1)
         return position_ids
 
+    def modi_pos2(self, position_ids, key_pos, use_past = False):
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        interval = 0
+        origin_position_ids = position_ids.clone()
+        
+        if use_past:
+            position_ids = position_ids * self.scaling_factor
+            position_ids =  position_ids - (self.scaling_factor- 1) * (image_token_end - image_token_start) + interval
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids = position_ids * self.scaling_factor
+            # import pdb;pdb.set_trace()
+            position_ids[:, image_token_end - interval:] = position_ids[:, image_token_end - interval:] -  (self.scaling_factor- 1) * (image_token_end - image_token_start) + interval 
+            position_ids[:, image_token_start:image_token_end] =  origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- 1) * origin_position_ids[:, image_token_start]
+        
+        return position_ids
+
+
+    def modi_pos_low_angle(self, position_ids, key_pos, use_past = False):
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        origin_position_ids = position_ids.clone()
+        
+        if use_past:
+            position_ids = position_ids * self.scaling_factor
+            position_ids =  position_ids - (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) 
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids = position_ids * self.scaling_factor
+            # import pdb;pdb.set_trace()
+            position_ids[:, image_token_end :] = position_ids[:, image_token_end :] -  (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) 
+            position_ids[:, image_token_start:image_token_end] = self.scaling_factor2 * origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- self.scaling_factor2) * origin_position_ids[:, image_token_start]
+        
+        return position_ids
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -348,9 +413,11 @@ class LlamaAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos2, sin2 = self.rotary_emb2(value_states, seq_len=kv_seq_len * self.scaling_factor)
+
         if modi_pos:
-            tmp_position_ids = self.modi_pos(position_ids.clone(), key_pos, use_past = past_key_value is not None)
-            tmp_query_states, tmp_key_states = apply_rotary_pos_emb(query_states.clone(), key_states.clone(), cos, sin,tmp_position_ids)
+            tmp_position_ids = self.modi_pos_low_angle(position_ids.clone(), key_pos, use_past = past_key_value is not None)
+            tmp_query_states, tmp_key_states = apply_rotary_pos_emb(query_states.clone(), key_states.clone(), cos2, sin2,tmp_position_ids)
 
             attn_weights_with_modi_pos = self.estimate_attention_without_pos(tmp_query_states, tmp_key_states, attention_mask)
 
@@ -388,7 +455,8 @@ class LlamaAttention(nn.Module):
             except:
                 import pdb;pdb.set_trace()      
             attn_diff =  attn_weights_with_modi_pos[:, :, image_token_end:, image_token_start:image_token_end]
-            attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff
+            attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = attn_diff
+            #attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff
 
         if adaptive_mask:
             attn_output, final_mask = self.values_noise_multiply(attn_weights, key_pos, value_states,  attn_weights_all = None)
@@ -754,10 +822,10 @@ class LlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
-                if idx > 5:
-                    use_neighbourhood = False
-                    use_distribution = False
-                    modi_pos = False
+                # if idx > 5:
+                #     use_neighbourhood = False
+                #     use_distribution = False
+                #     modi_pos = False
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
@@ -850,7 +918,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         input_ids_cd: torch.LongTensor = None, 
         return_dict: Optional[bool] = None,
+        gamma: Optional[float] = 0.2,
         reduction: Optional[str] = "mean",
+        tokenizer = None,
     ) -> Union[Tuple, CausalLMOutputWithPastIMCCD]:
         r"""
         Args:
@@ -885,6 +955,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         adaptive_mask = False
         use_neighbourhood = False
+        modi_pos = False
         if mask_mode == "ved":
             adaptive_mask = True
         if mask_mode == "imccd":
@@ -907,6 +978,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             adaptive_mask = adaptive_mask,
             modi_pos = modi_pos,
             key_pos = key_pos,
+            gamma = gamma,
         )
 
         hidden_states = outputs[0]

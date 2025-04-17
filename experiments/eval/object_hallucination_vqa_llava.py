@@ -155,6 +155,7 @@ if __name__ == "__main__":
     parser.add_argument("--mask_mode", type=str, default="gradient")
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
+    parser.add_argument("--gamma", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     set_seed(args.seed)

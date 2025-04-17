@@ -55,26 +55,40 @@ def eval_model(args):
         else:
             image_tensor_cd = None   
         
-        pred = model.generate(
-            input_ids=input_ids.input_ids.cuda(),
-            attention_mask=input_ids.attention_mask.cuda(),
-            do_sample=True,
-            max_new_tokens=20,
-            min_new_tokens=1,
-            length_penalty=1,
-            num_return_sequences=1,
-            output_hidden_states=True,
-            use_cache=True,
-            pad_token_id=tokenizer.eod_id,
-            eos_token_id=tokenizer.eod_id,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            top_k=args.top_k,
-            images = image_tensor,
-            images_cd=image_tensor_cd,
-            cd_beta = args.cd_beta,
-            cd_alpha = args.cd_alpha,
-        )
+        with torch.inference_mode():
+            generate_args = dict(
+                input_ids=input_ids.input_ids.cuda(),
+                attention_mask=input_ids.attention_mask.cuda(),
+                max_new_tokens=20,
+                min_new_tokens=1,
+                length_penalty=1,
+                num_return_sequences=1,
+                output_hidden_states=True,
+                use_cache=True,
+                pad_token_id=tokenizer.eod_id,
+                eos_token_id=tokenizer.eod_id,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                top_k=args.top_k,
+                images = image_tensor,
+                images_cd=image_tensor_cd,
+                cd_beta = args.cd_beta,
+                cd_alpha = args.cd_alpha,
+                use_kvcache = args.use_kvcache,
+                use_mask = args.use_mask,
+                mask_mode = args.mask_mode,
+                key_pos = key_pos,
+                gamma=args.gamma,
+            )
+            if args.sampling == 'sample':
+                generate_args.update(do_sample=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
+            
+            pred = model.generate(**generate_args)
 
         outputs = [
             tokenizer.decode(_[input_ids.input_ids.size(1):].cpu(),
@@ -109,6 +123,14 @@ if __name__ == "__main__":
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+<<<<<<< HEAD
+=======
+    parser.add_argument("--gamma", type=float, default=0.2)
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
+    parser.add_argument("--use_kvcache", action='store_true', default=False)
+    
+>>>>>>> 11d7567... update
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

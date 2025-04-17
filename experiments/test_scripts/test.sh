@@ -6,25 +6,20 @@ dataset_name="coco"
 type="popular"
 # type="adversarial"
 
+# # model="qwenvl"
 model="llava15"
 # model="instructblip"
 
-seed=55
+seed=42
+sampling="sample"
 
-# python ./eval/eval_pope.py \
-# --gen_files ./output/${dataset_name}/llava15_${dataset_name}_pope_${type}_answers_baseline_seed${seed}.jsonl \
-# --gt_files data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json
-
-# python ./eval/eval_pope.py \
-# --gen_files ./output/${dataset_name}/${model}_${dataset_name}_pope_${type}_answers_cd_seed${seed}.jsonl \
-# --gt_files data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json
-
-# python ./eval/eval_pope.py \
-# --gen_files ./output/${dataset_name}/${model}_${dataset_name}_pope_${type}_answers_icd_seed${seed}.jsonl \
-# --gt_files data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json
+results_file="${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}_${sampling}.jsonl"
 
 
-echo ${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}.jsonl 
+echo ${results_file}
 python ./eval/eval_pope.py \
 --gen_files ./output/${dataset_name}/${type}/${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}.jsonl \
 --gt_files data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json
+
+
+

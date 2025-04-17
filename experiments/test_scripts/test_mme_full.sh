@@ -1,25 +1,25 @@
 dataset_name="mme_full"
-
 model="llava15"
-seed=55
+# model="instructblip"
+seed=42
 
 
-# python ./experiments/eval/eval_mme.py \
-# --eval_type full \
-# --results_dir ./experiments/output/${dataset_name}/${model}_${dataset_name}_answers_baseline_seed${seed}/mme_answers 
-
-
-# python ./experiments/eval/eval_mme.py \
-# --eval_type full \
-# --results_dir ./experiments/output/${dataset_name}/${model}_${dataset_name}_answers_cd500_beta03_seed${seed}/mme_answers
-
-
-# python ./experiments/eval/eval_mme.py \
-# --eval_type full \
-# --results_dir ./experiments/output/${dataset_name}/${model}_${dataset_name}_answers_icd_beta03_seed${seed}/mme_answers
-
-
-python ./experiments/eval/eval_mme.py \
+python ./eval/eval_mme.py \
 --eval_type full \
---results_dir ./experiments/output/${dataset_name}/${model}_${dataset_name}_answers_imccd_seed${seed}/mme_answers
+--results_dir ./output/${dataset_name}/${model}_${dataset_name}_answers_baseline_seed${seed}/mme_answers 
+
+
+python ./eval/eval_mme.py \
+--eval_type full \
+--results_dir ./output/${dataset_name}/${model}_${dataset_name}_answers_vcd_seed${seed}/mme_answers
+
+
+python ./eval/eval_mme.py \
+--eval_type full \
+--results_dir ./output/${dataset_name}/${model}_${dataset_name}_answers_icd_seed${seed}/mme_answers
+
+
+# python ./eval/eval_mme.py \
+# --eval_type full \
+# --results_dir ./output/${dataset_name}/${model}_${dataset_name}_answers_imccd_lowangle_alpha05_seed42/mme_answers
 

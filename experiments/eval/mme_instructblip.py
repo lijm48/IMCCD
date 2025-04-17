@@ -58,12 +58,31 @@ def eval_model(args):
         else:
             image_tensor_cd = None      
 
-        with torch.inference_mode():
-            outputs = model.generate({"image": image_tensor, "prompt": prompt},
-                use_nucleus_sampling=True, num_beams=1,
-                top_p = args.top_p, repetition_penalty=1,
-                images_cd=image_tensor_cd, cd_beta = args.cd_beta, cd_alpha = args.cd_alpha,
-                use_mask = args.use_mask, mask_mode = args.mask_mode, use_icd = args.use_icd)
+        with torch.inference_mode():    
+            generate_args = dict(
+                samples={"image": image_tensor, "prompt": prompt},
+                num_beams=1,
+                top_p = args.top_p,
+                repetition_penalty=1,
+                cd_alpha = args.cd_alpha,
+                cd_beta = args.cd_beta,
+                temperature=args.temperature,
+                use_mask = args.use_mask,
+                mask_mode = args.mask_mode,
+                images_cd=image_tensor_cd,
+                use_icd = args.use_icd,
+            )
+            
+            if args.sampling == 'sample':
+                generate_args.update(use_nucleus_sampling=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                    generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            else:
+                import pdb;pdb.set_trace()
+            outputs = model.generate(**generate_args)
 
         outputs = outputs[0]
         ans_file.write(json.dumps({"question_id": idx,
@@ -98,6 +117,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_mask", action='store_true', default=False)
     parser.add_argument("--mask_mode", type=str, default="gradient")
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

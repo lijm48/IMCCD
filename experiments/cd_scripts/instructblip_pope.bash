@@ -1,4 +1,4 @@
-seed=${1:-55}
+seed=${1:-42}
 dataset_name=${2:-"coco"}
 # dataset_name=${2:-"aokvqa"}
 # dataset_name=${2:-"gqa"}
@@ -7,8 +7,10 @@ type=${3:-"popular"}
 # type=${3:-"adversarial"}
 model_path=${4:-"../../checkpoints/instructblip-vicuna-7b"}
 cd_alpha=${5:-3}
-cd_beta=${6:-0.2}
+cd_beta=${6:-0.3}
 noise_step=${7:-999}
+sampling=${8:-'greedy_search'}
+mask_mode=${9:-'ved'}
 if [[ $dataset_name == 'coco' || $dataset_name == 'aokvqa' ]]; then
   image_folder=../../../data/coco/val2014
 else
@@ -40,7 +42,7 @@ fi
 # --model-path ${model_path} \
 # --question-file ./data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json \
 # --image-folder ${image_folder} \
-# --answers-file ./output/${dataset_name}/${type}/instructblip_${dataset_name}_pope_${type}_answers_vcd_seed${seed}.jsonl \
+# --answers-file ./output/${dataset_name}/${type}/instructblip_${dataset_name}_pope_${type}_answers_icd_seed${seed}.jsonl \
 # --cd_alpha $cd_alpha \
 # --cd_beta $cd_beta \
 # --use_cd \
@@ -52,8 +54,8 @@ CUDA_VISIBLE_DEVICES=1 python ./eval/object_hallucination_vqa_instructblip.py \
 --model-path ${model_path} \
 --question-file ./data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json \
 --image-folder ${image_folder} \
---answers-file ./output/${dataset_name}/${type}/instructblip_${dataset_name}_pope_${type}_answers_imccd_seed${seed}.jsonl \
---cd_alpha 1 \
+--answers-file ./output/${dataset_name}/${type}/instructblip_${dataset_name}_pope_${type}_answers_imccd_seed${seed}_${sampling}.jsonl \
+--cd_alpha $cd_alpha \
 --cd_beta $cd_beta \
 --use_cd \
 --use_mask \

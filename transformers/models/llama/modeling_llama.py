@@ -219,8 +219,6 @@ def apply_rotary_pos_emb_part(q, k, cos, sin, position_ids, key_pos):
 
     return q_embed, k_embed
 
-def pos_enhance_multiply(q, k):
-    pass
 
 
 
@@ -339,6 +337,10 @@ class LlamaAttention(nn.Module):
         # import pdb;pdb.set_trace()
         if self.config.rope_scaling is None:
             self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
+            self.scaling_factor = 3 #step for text tokens
+            self.scaling_factor2 = 1 #step for image tokens
+            self.scaling_factor3 = 3 #interval
+            self.rotary_emb_low_angle = LlamaLinearScalingRotaryEmbedding(self.head_dim , max_position_embeddings=self.max_position_embeddings, scaling_factor =self.scaling_factor3 )
         else:
             scaling_type = self.config.rope_scaling["type"]
             scaling_factor = self.config.rope_scaling["factor"]
@@ -542,7 +544,25 @@ class LlamaAttention(nn.Module):
 
         return position_ids
 
-
+    def modi_pos_low_angle(self, position_ids, key_pos, use_past = False):
+        try:
+            image_token_start = key_pos[0]['image_token_start']
+            image_token_end = key_pos[0]['image_token_end']
+        except:
+            import pdb;pdb.set_trace()
+        origin_position_ids = position_ids.clone()
+        
+        if use_past:
+            position_ids = position_ids * self.scaling_factor
+            position_ids =  position_ids - (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) 
+        else:
+            assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
+            position_ids = position_ids * self.scaling_factor
+            # import pdb;pdb.set_trace()
+            position_ids[:, image_token_end :] = position_ids[:, image_token_end :] -  (self.scaling_factor- self.scaling_factor2) * (image_token_end - image_token_start) 
+            position_ids[:, image_token_start:image_token_end] = self.scaling_factor2 * origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- self.scaling_factor2) * origin_position_ids[:, image_token_start]
+        
+        return position_ids
 
     def forward(
         self,
@@ -631,6 +651,7 @@ class LlamaAttention(nn.Module):
         if adaptive_mask:
             if use_past:
                 assert past_attns is not None 
+                # import pdb;pdb.set_trace()
                 
                 if attn_weights.shape[3] == past_attns.shape[3] + 1:
                     tmp_attn = torch.zeros(1, past_attns.shape[1], past_attns.shape[2], 1).to(attn_weights.device)
@@ -640,7 +661,11 @@ class LlamaAttention(nn.Module):
                     try:
                         attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1], attn_weights), dim = 2)
                     except:
-                        import pdb;pdb.set_trace()
+                        # in case of the beam search (beam size > 1)
+
+                        if past_attns.size(0) != attn_weights.size(0):
+                            attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1].repeat(attn_weights.size(0), 1, 1, 1), attn_weights), dim = 2)
+    
 
               
 
@@ -676,7 +701,7 @@ class LlamaAttention(nn.Module):
                 attn_diff =  attn_weights_with_modi_pos[:, :, image_token_end:, image_token_start:image_token_end]
                 attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff       
         if not use_past or not adaptive_mask:
-            attn_weights_all = attn_weights.clone()
+            attn_weights_all = attn_weights
 
             
         # upcast attention to fp32
@@ -1092,7 +1117,9 @@ class LlamaModel(LlamaPreTrainedModel):
                     past_attns= past_attns,
                     layer_idx = idx,    
                     modi_pos = modi_pos,
-                    past_key_value_without_pos =  past_key_value_without_pos,                                                                                                                      
+                    past_key_value_without_pos =  past_key_value_without_pos,
+                    low_angle = low_angle,        
+                    gamma = gamma,                                                                                                              
                 )
 
             hidden_states = layer_outputs[0]

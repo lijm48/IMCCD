@@ -133,8 +133,15 @@ def eval_model(args):
             key_pos =key_pos,
             mask_mode = args.mask_mode,
             input_ids_cd = input_ids_cd if args.use_icd else None,
-            tokenizer = tokenizer)
-        
+            tokenizer = tokenizer,
+        )
+        if args.sampling == 'sample':
+            generate_args.update(do_sample=True)
+        elif args.sampling == 'greedy_search':
+            assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+            generate_args.update(do_sample=False, num_beams=args.num_beams)
+        elif args.sampling == 'beam_search':
+            generate_args.update(do_sample=False, num_beams=args.num_beams)
         
         
         input_token_len = input_ids.shape[1]

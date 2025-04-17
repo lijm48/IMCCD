@@ -80,20 +80,44 @@ def eval_model(args):
         # prepare the image
         image_tensor = vis_processors["eval"](raw_image).unsqueeze(0).to(device)
         ## create a white image for contrastive decoding
-        if args.use_cd:
+        if args.use_icd:
+            image_tensor_cd = image_tensor
+        elif args.use_cd:
             image_tensor_cd = add_diffusion_noise(image_tensor, args.noise_step)
         else:
-            image_tensor_cd = None      
+            image_tensor_cd = None     
         qs = "Please describe this image in detail."
         prompt = qs
 
         with torch.inference_mode():
-            outputs = model.generate({"image": image_tensor, "prompt": prompt},
-                use_nucleus_sampling=True, num_beams=1,
-                top_p = args.top_p, repetition_penalty=1,
-                images_cd=image_tensor_cd, cd_beta = args.cd_beta, cd_alpha = args.cd_alpha,
-                use_mask = args.use_mask, mask_mode = args.mask_mode, use_icd = args.use_icd)
-
+            # outputs = model.generate({"image": image_tensor, "prompt": prompt},
+            #     use_nucleus_sampling=True, num_beams=1,
+            #     top_p = args.top_p, repetition_penalty=1,
+            #     images_cd=image_tensor_cd, cd_beta = args.cd_beta, cd_alpha = args.cd_alpha,
+            #     use_mask = args.use_mask, mask_mode = args.mask_mode, use_icd = args.use_icd)
+            generate_args = dict(
+                samples={"image": image_tensor, "prompt": prompt},
+                num_beams=1,
+                top_p = args.top_p,
+                repetition_penalty=1,
+                cd_alpha = args.cd_alpha,
+                cd_beta = args.cd_beta,
+                temperature=args.temperature,
+                use_mask = args.use_mask,
+                mask_mode = args.mask_mode,
+                images_cd=image_tensor_cd,
+                use_icd = args.use_icd,
+                tokenizer = True,
+            )
+            
+            if args.sampling == 'sample':
+                generate_args.update(use_nucleus_sampling=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                    generate_args.update(use_nucleus_sampling=False, num_beams=args.num_beams)
+            outputs = model.generate(**generate_args)
         outputs = outputs[0]
         img_save["caption"] = outputs
         # outputs = outputs.strip()
@@ -124,6 +148,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_mask", action='store_true', default=False)
     parser.add_argument("--mask_mode", type=str, default="gradient")
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

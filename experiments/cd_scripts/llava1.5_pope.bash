@@ -1,4 +1,4 @@
-seed=${1:-55}
+seed=${1:-42}
 dataset_name=${2:-"coco"}
 # dataset_name=${2:-"aokvqa"}
 # dataset_name=${2:-"gqa"}
@@ -9,6 +9,8 @@ model_path=${4:-"../../checkpoints/llava-v1.5-7b"}
 cd_alpha=${5:-3}
 cd_beta=${6:-0.2}
 noise_step=${7:-999}
+sampling=${8:-'sample'}
+mask_mode=${9:-'imccd'}
 if [[ $dataset_name == 'coco' || $dataset_name == 'aokvqa' ]]; then
   image_folder=../../../data/coco/val2014
 else
@@ -39,7 +41,6 @@ fi
 # --cd_alpha $cd_alpha \
 # --cd_beta $cd_beta \
 # --use_cd \
-# --use_icd \
 # --noise_step $noise_step \
 # --seed ${seed}
 
@@ -61,7 +62,7 @@ CUDA_VISIBLE_DEVICES=0 python ./eval/object_hallucination_vqa_llava.py \
 --model-path ${model_path} \
 --question-file ./data/POPE/${dataset_name}/${dataset_name}_pope_${type}.json \
 --image-folder ${image_folder} \
---answers-file ./output/${dataset_name}/${type}/llava15_${dataset_name}_pope_${type}_answers_imccd_seed${seed}.jsonl \
+--answers-file ./output/${dataset_name}/${type}/llava15_${dataset_name}_pope_${type}_answers_${mask_mode}_imccd_seed${seed}_${sampling}.jsonl \
 --cd_alpha $cd_alpha \
 --cd_beta $cd_beta \
 --use_cd \

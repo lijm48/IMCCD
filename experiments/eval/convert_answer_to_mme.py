@@ -63,6 +63,7 @@ if __name__ == "__main__":
                     prompt = prompt + ' Please answer yes or no.'
                     if (category, file, prompt) not in GT:
                         prompt = prompt.replace(' Please answer yes or no.', '  Please answer yes or no.')
+                # import pdb;pdb.set_trace()
                 gt_ans = GT[category, file, prompt]
                 tup = file, prompt, gt_ans, answer
                 fp.write('\t'.join(tup) + '\n')

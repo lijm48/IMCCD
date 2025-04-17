@@ -256,6 +256,8 @@ class Blip2VicunaInstruct(Blip2Base):
         use_mask = False,
         mask_mode = "adaptive",
         use_icd = False,
+        tokenizer = None,
+        gamma = 0.2,
     ):
         self.llm_tokenizer.padding_side = "left"
 
@@ -374,7 +376,12 @@ class Blip2VicunaInstruct(Blip2Base):
             return_tensors="pt"
         ).to(image.device)
         if use_icd:
-            prompt_cd = ["You are a confused image caption model. " + single for single in prompt]
+            # import pdb;pdb.set_trace()
+            if tokenizer:
+                prompt_cd = ["You are a confused image caption model. " + single for single in prompt]
+            else:
+                prompt_cd = ["You are a confused object detector. " + single for single in prompt]
+            # prompt_cd = ["You are a confused image caption model. " + single for single in prompt]
             llm_tokens_cd = self.llm_tokenizer(
                 prompt_cd,
                 padding="longest",
@@ -420,6 +427,7 @@ class Blip2VicunaInstruct(Blip2Base):
                 key_pos = key_pos,
                 use_key_pos  = True,
                 attention_mask_cd = attention_mask_cd,
+                tokenizer = tokenizer,
                 # inputs_embeds_icd= ,
             )
 
