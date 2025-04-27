@@ -14,7 +14,6 @@ seed=42
 sampling="sample"
 
 results_file="${model}_${dataset_name}_pope_${type}_answers_imccd_seed${seed}_${sampling}.jsonl"
-results_file="qwenvl_gqa_pope_popular_answers_imccd_imccd_seed42_sample.jsonl"
 
 
 echo ${results_file}
