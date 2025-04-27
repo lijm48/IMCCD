@@ -109,8 +109,8 @@ class LlamaRotaryEmbedding(torch.nn.Module):
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
         t = torch.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
-
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = torch.cat((freqs, freqs), dim=-1)
         self.register_buffer("cos_cached", emb.cos()[None, None, :, :].to(dtype), persistent=False)
@@ -125,6 +125,10 @@ class LlamaRotaryEmbedding(torch.nn.Module):
             self.cos_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
             self.sin_cached[:, :, :seq_len, ...].to(dtype=x.dtype),
         )
+
+
+
+
 
 
 class LlamaLinearScalingRotaryEmbedding(LlamaRotaryEmbedding):
@@ -334,7 +338,7 @@ class LlamaAttention(nn.Module):
         self._init_rope()
 
     def _init_rope(self):
-        # import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()f
         if self.config.rope_scaling is None:
             self.rotary_emb = LlamaRotaryEmbedding(self.head_dim, max_position_embeddings=self.max_position_embeddings)
             self.scaling_factor = 3 #step for text tokens
@@ -418,7 +422,7 @@ class LlamaAttention(nn.Module):
 
 
 
-    def values_noise_multiply(self, attn_weights, key_pos, value_states, attn_weights_all = None, zero_noise = True, use_past = False):
+    def values_noise_multiply(self, attn_weights, key_pos, value_states, attn_weights_all = None, zero_noise = True, use_past = False, accel = True):
         try:
             image_token_start = key_pos[0]['image_token_start']
             image_token_end = key_pos[0]['image_token_end']
@@ -426,10 +430,14 @@ class LlamaAttention(nn.Module):
             import pdb;pdb.set_trace()
         
         if zero_noise:
-            mean = value_states[:, :, image_token_start:image_token_end].mean(dim=(2,3), keepdim = True)
-            noise_value_states = mean.repeat(1, 1, value_states.shape[2],value_states.shape[3])
+            if accel:
+                mean = value_states[:, :, image_token_start:image_token_end].mean(dim=(2,3), keepdim = True).squeeze(3)
+                noise_value_states = mean.repeat(1, 1, attn_weights.shape[2])
+            else:
+                mean = value_states[:, :, image_token_start:image_token_end].mean(dim=(2,3), keepdim = True)
+                noise_value_states = mean.repeat(1, 1, value_states.shape[2],value_states.shape[3])            
         else:
-            noise_value_states = self.add_diffusion_noise(value_states.clone(), 999, 0.01)     
+            noise_value_states = self.add_diffusion_noise(value_states.clone(), 999, 0.01)  
         
         if use_past:
             img_attn = attn_weights[:, :, :, image_token_start:image_token_end]
@@ -448,7 +456,10 @@ class LlamaAttention(nn.Module):
         tmp_attn_weights = tmp_attn_weights.to(value_states.dtype) 
         final_mask = final_mask.to(value_states.dtype)
         attn_output_ori = torch.matmul(tmp_attn_weights  * (1 - final_mask), value_states)
-        attn_output_noise = torch.matmul(tmp_attn_weights * final_mask, noise_value_states)
+        if zero_noise and accel:
+            attn_output_noise = ((tmp_attn_weights * final_mask).sum(dim = 3) * noise_value_states).unsqueeze(3).repeat(1, 1, 1,value_states.shape[3])
+        else:
+            attn_output_noise = torch.matmul(tmp_attn_weights * final_mask, noise_value_states)
         final_attn = attn_output_ori + attn_output_noise
         return final_attn, final_mask
 
@@ -501,7 +512,7 @@ class LlamaAttention(nn.Module):
         hidden_states[:, :,  image_token_start:image_token_end] = tmp_hidden_states
         return hidden_states
 
-    def estimate_attention_without_pos(self, query_states, key_states, attention_mask):
+    def estimate_attention_without_pos(self, query_states, key_states, attention_mask = None):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
 
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
@@ -579,9 +590,12 @@ class LlamaAttention(nn.Module):
         past_attns: Optional[torch.FloatTensor] = None,
         layer_idx: Optional[int] = -1,
         gamma: Optional[float] = 0.2,
+        low_angle: Optional[bool] = False,
+        accel: Optional[bool] = True, 
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         time1 = time.time()
+        # import pdb;pdb.set_trace()
         if self.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.pretraining_tp
             query_slices = self.q_proj.weight.split((self.num_heads * self.head_dim) // self.pretraining_tp, dim=0)
@@ -609,21 +623,32 @@ class LlamaAttention(nn.Module):
         if past_key_value is not None:
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        cos_low_angle, sin_low_angle = self.rotary_emb_low_angle(value_states, seq_len=kv_seq_len * self.scaling_factor)
         attn_weights_all = None
-
-
-
-       
         if modi_pos:
-
-            tmp_position_ids = self.modi_pos(position_ids.clone(), key_pos, use_past = past_key_value is not None)
-            tmp_query_states, tmp_key_states = apply_rotary_pos_emb(query_states.clone(), key_states.clone(), cos, sin,tmp_position_ids)
+            try:
+                image_token_start = key_pos[0]['image_token_start']
+                image_token_end = key_pos[0]['image_token_end']
+            except:
+                import pdb;pdb.set_trace()  
+            if low_angle:
+                tmp_position_ids = self.modi_pos_low_angle(position_ids.clone(), key_pos, use_past = past_key_value is not None)
+                tmp_query_states, tmp_key_states = apply_rotary_pos_emb(query_states.clone(), key_states.clone(), cos_low_angle, sin_low_angle, tmp_position_ids)
+            else:
+                tmp_position_ids = self.modi_pos(position_ids.clone(), key_pos, use_past = past_key_value is not None)
+                tmp_query_states, tmp_key_states = apply_rotary_pos_emb(query_states.clone(), key_states.clone(), cos, sin,tmp_position_ids)
             if past_key_value is not None:
                 # reuse k, v, self_attention
                 tmp_key_states = torch.cat([past_key_value_without_pos[0], tmp_key_states], dim=2)
-            #tmp_query_states, tmp_key_states = apply_rotary_pos_emb_part(query_states, key_states, cos, sin, position_ids)
-            attn_weights_with_modi_pos = self.estimate_attention_without_pos(tmp_query_states, tmp_key_states, attention_mask)
-            
+
+            if accel:
+                tmp_image_key_states = tmp_key_states[:, :,  image_token_start:image_token_end]
+                if past_key_value is None:
+                    tmp_query_states = tmp_query_states[:, :,  image_token_end:]
+                attn_weights_with_modi_pos = self.estimate_attention_without_pos(tmp_query_states, tmp_image_key_states)
+            else:
+                attn_weights_with_modi_pos = self.estimate_attention_without_pos(tmp_query_states, tmp_key_states, attention_mask)
+
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
         if modi_pos:
             attn_weights_all = attn_weights_with_modi_pos.clone()
@@ -648,6 +673,7 @@ class LlamaAttention(nn.Module):
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+        
         if adaptive_mask:
             if use_past:
                 assert past_attns is not None 
@@ -656,7 +682,7 @@ class LlamaAttention(nn.Module):
                 if attn_weights.shape[3] == past_attns.shape[3] + 1:
                     tmp_attn = torch.zeros(1, past_attns.shape[1], past_attns.shape[2], 1).to(attn_weights.device)
                     tmp_attn = torch.cat((past_attns[layer_idx:layer_idx+1], tmp_attn ), dim = 3)
-                    attn_weights_all = torch.cat((tmp_attn, attn_weights), dim = 2)
+                    attn_weights_all = torch.cat((tmp_attn.repeat(attn_weights.size(0), 1, 1, 1), attn_weights), dim = 2)
                 else:
                     try:
                         attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1], attn_weights), dim = 2)
@@ -667,11 +693,7 @@ class LlamaAttention(nn.Module):
                             attn_weights_all = torch.cat((past_attns[layer_idx:layer_idx+1].repeat(attn_weights.size(0), 1, 1, 1), attn_weights), dim = 2)
     
 
-              
 
-        
-
-        attn_weights =self.attention_adapter(attn_weights)
 
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             
@@ -686,29 +708,40 @@ class LlamaAttention(nn.Module):
                     f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
                 )
             attn_weights = attn_weights + attention_mask
-
-        if modi_pos:
-            try:
-                image_token_start = key_pos[0]['image_token_start']
-                image_token_end = key_pos[0]['image_token_end']
-            except:
-                import pdb;pdb.set_trace()      
+       
+        if modi_pos:    
 
             if use_past:
-                attn_diff =  attn_weights_with_modi_pos[:, :, :, image_token_start:image_token_end]
-                attn_weights[:, :, :, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, :, image_token_start:image_token_end] + gamma * attn_diff
+                if accel:
+                    attn_diff =  attn_weights_with_modi_pos
+                else:
+                    attn_diff =  attn_weights_with_modi_pos[:, :, :, image_token_start:image_token_end]
+                if low_angle:
+                    attn_weights[:, :, :, image_token_start:image_token_end] = attn_diff
+                else:
+                    attn_weights[:, :, :, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, :, image_token_start:image_token_end] + gamma * attn_diff
+
             else:
-                attn_diff =  attn_weights_with_modi_pos[:, :, image_token_end:, image_token_start:image_token_end]
-                attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff       
+                if accel:
+                    attn_diff =  attn_weights_with_modi_pos
+                else:
+                    attn_diff =  attn_weights_with_modi_pos[:, :, image_token_end:, image_token_start:image_token_end]
+                if low_angle:
+                    attn_weights[:, :, image_token_end:, image_token_start:image_token_end] =  attn_diff
+                else:
+                    attn_weights[:, :, image_token_end:, image_token_start:image_token_end] = (1-gamma) * attn_weights[:, :, image_token_end: , image_token_start:image_token_end] + gamma * attn_diff 
+        
         if not use_past or not adaptive_mask:
             attn_weights_all = attn_weights
 
             
         # upcast attention to fp32
+        
         if adaptive_mask:
             if use_past:
                 attn_weights_all[:, :, -attn_weights.shape[2]:] = attn_weights
-            attn_output, final_mask = self.values_noise_multiply(attn_weights, key_pos, value_states,  attn_weights_all = attn_weights_all, use_past = use_past)
+            
+            attn_output, final_mask = self.values_noise_multiply(attn_weights, key_pos, value_states,  attn_weights_all = attn_weights_all, use_past = use_past, accel = accel)
         else:
             attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_output = torch.matmul(attn_weights, value_states)        
@@ -720,6 +753,7 @@ class LlamaAttention(nn.Module):
                 f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
                 f" {attn_output.size()}"
             )
+        
         attn_output = attn_output.transpose(1, 2).contiguous()
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
@@ -766,6 +800,7 @@ class LlamaDecoderLayer(nn.Module):
         modi_pos: Optional[bool] = False,
         past_key_value_without_pos: Optional[Tuple[torch.Tensor]] = None,
         gamma: Optional[float] = 0.2,
+        low_angle: Optional[bool] = False,
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         """
         Args:
@@ -780,7 +815,7 @@ class LlamaDecoderLayer(nn.Module):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
-
+        # import pdb;pdb.set_trace()
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
@@ -801,6 +836,7 @@ class LlamaDecoderLayer(nn.Module):
             layer_idx = layer_idx,
             modi_pos = modi_pos,
             gamma = gamma,
+            low_angle = low_angle,
         )
         if modi_pos:
             hidden_states, self_attn_weights, present_key_value,  present_key_value_without_pos= outputs
@@ -1010,7 +1046,9 @@ class LlamaModel(LlamaPreTrainedModel):
         past_attns: Optional[torch.FloatTensor] = None,
         modi_pos: Optional[bool] = False,
         gamma: Optional[float] = 0.2,
+        low_angle: Optional[bool] = True,
     ) -> Union[Tuple, BaseModelOutputWithPastIMCCD]:
+        # import pdb;pdb.set_trace()
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -1100,9 +1138,7 @@ class LlamaModel(LlamaPreTrainedModel):
                     None,
                 )
             else:
-                if idx > 5:
-                    use_neighbourhood = False
-                    use_distribution = False
+                if not low_angle and idx > 5:
                     modi_pos = False
      
                 layer_outputs = decoder_layer(

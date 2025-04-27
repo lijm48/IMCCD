@@ -1,6 +1,7 @@
 import copy
 import inspect
 import warnings
+import numpy as np
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
 
@@ -17,13 +18,11 @@ from transformers.generation.stopping_criteria import (
     validate_stopping_criteria,
 )
 import transformers
-from transformers.generation.utils import SampleOutput
+from transformers.generation.utils import SampleOutput, GreedySearchOutput, BeamSearchOutput
+from transformers.generation.beam_search import BeamScorer, BeamSearchScorer, ConstrainedBeamSearchScorer
 from .attention_adapter import LLaVaAttentionerManager
 import torch.optim as optim
 from .image_process import vis_mask, plot_distribution, build_neighbourhood_mask, vis_attention, vis_attn_sum
-
-
-
 
 
 def sample(
@@ -100,6 +99,7 @@ def sample(
     this_peer_finished = False  # used by synced_gpus only
 
     # auto-regressive generation
+    gamma = model_kwargs.get("use_mask")
     use_mask = model_kwargs.get("use_mask")
     mask_mode = model_kwargs.get("mask_mode")
     key_pos = model_kwargs.get("key_pos")
@@ -110,6 +110,7 @@ def sample(
     flag2 = 0
     attn_cd = None
     past_num = 1
+    attn_sum = []
     if use_key_pos:
         flag = 1
     
@@ -126,7 +127,6 @@ def sample(
             if this_peer_finished_flag.item() == 0.0:
                 break
 
-
         # prepare model inputs
         with torch.no_grad():
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -141,22 +141,43 @@ def sample(
                     output_hidden_states=output_hidden_states,
                     key_pos = key_pos if flag == 1 else [],
                     modi_pos = True if mask_mode == "imccd" else False,
+                    gamma = gamma
                 )
+
+        # TODO: statistic the attention activation
+        # import pdb;pdb.set_trace()
+        # if vis_flag:    
+        #     sample_id = model_kwargs.get("sample_id")
+        #     attn_last_layer = outputs['attentions'][-1]   # (bsz, num_head, seq_len, tgt_len)
+            
+        #     ind_start = key_pos[0]["image_token_start"].item()
+        #     ind_end = (key_pos[0]["image_token_end"] + attn_last_layer.shape[3]).item()
+            
+        #     vis_attn = attn_last_layer[:, :, -1, ind_start: ind_end]    # (bsz, num_head, tgt_len)
+        #     vis_attn = vis_attn.cpu().numpy()
+
+        #     # save to disk
+        #     save_dir = '/disk/work/jczhang/code/IMCCD/experiments/output/vis_attn/'
+        #     np.save(f'{save_dir}/cross_modal_attn_last_layer_{sample_id}.npy', vis_attn)
+        #     vis_flag = 0
         
         if synced_gpus and this_peer_finished:
             continue  # don't waste resources running the code we don't need
 
         next_token_logits = outputs.logits[:, -1, :]
+
         if flag == 0 and key_pos != None:
             token_length = outputs['attentions'][-1].shape[3]
             flag = 1
             for i in range(len(key_pos)):
                 key_pos[i]["image_token_end"] = key_pos[i]["image_token_end"] + token_length 
-        if use_mask and use_kvcache:
+        if use_mask:
             if mask_mode == "imccd" or mask_mode == "ved":
                 if attn_cd is None:
                     output_attns  = [attn for attn in outputs['attentions']]
                     output_attns = torch.cat(output_attns, dim=0)
+
+
                     try:
                         image_token_end = key_pos[0]['image_token_end']
                     except:
@@ -174,7 +195,7 @@ def sample(
                 output_attns = output_attns  / (output_attns .sum(dim=2) + 1e-7 * (output_attns .sum(dim=2) == 0).float() ).unsqueeze(2)
                 output_attns  = output_attns.mean(dim = 0)
                 past_attns = output_attns[-1]
-        # if use_mask :
+        # if use_mask and use_kvcache:
         #     if mask_mode == "imccd" or mask_mode == "ved":
         #         if attn_cd is None:
         #             output_attns  = [attn for attn in outputs['attentions']]
@@ -205,7 +226,7 @@ def sample(
         output_hidden_states_wo_img = (
             output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
         )
-        
+
         if use_cd:
             with torch.inference_mode():
                 with torch.no_grad():
@@ -252,7 +273,7 @@ def sample(
                         )        
                     attn_cd = [attn for attn in outputs_cd['attentions']]   
                     attn_cd = torch.cat(attn_cd, dim=0)   
-  
+                    tmp_output_attns = attn_cd.to(torch.float32)
                     next_token_logits_cd = outputs_cd.logits[:, -1, :]
                     
                     
@@ -264,6 +285,7 @@ def sample(
                     cd_beta = model_kwargs.get("cd_beta") if model_kwargs.get("cd_beta") is not None else 0.1
                     
                     use_entropy = False
+                    check_word = False
                     if use_entropy:
                         next_prob_cd = nn.functional.softmax(next_token_logits_cd, dim=-1)
                         epsilon = 1e-6
@@ -353,7 +375,7 @@ def sample(
             if pad_token_id is None:
                 raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
             next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-
+            
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
         if input_ids_cd != None:
@@ -1180,3 +1202,5 @@ def beam_search(
 
 def evolve_vcd_sampling():
     transformers.generation.utils.GenerationMixin.sample = sample
+    transformers.generation.utils.GenerationMixin.greedy_search = greedy_search
+    transformers.generation.utils.GenerationMixin.beam_search = beam_search

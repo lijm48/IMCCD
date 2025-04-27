@@ -21,7 +21,9 @@ if TYPE_CHECKING:
 from transformers.generation.utils import GenerateOutput
 from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
+    BaseModelOutputWithPastIMCCD,
     CausalLMOutputWithPast,
+    CausalLMOutputWithPastIMCCD
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
@@ -104,6 +106,50 @@ def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] 
     return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
 
 
+class AttentionAdapterBase(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.use_flag = True
+
+    def forward(self, attn_weights):
+        if self.use_flag:
+            return self._forward(attn_weights)
+        else:
+            return attn_weights
+
+    def _forward(self, attn_weights):
+        raise NotImplementedError
+
+    def register_input_ids(self, input_ids: torch.Tensor):
+        self.input_ids = input_ids
+
+
+class AttentionAdapter(AttentionAdapterBase):
+    def __init__(self) -> None:
+        super().__init__()
+        self.params = None
+
+    def _forward(self, attn_weights):
+        if self.params is None:
+            self.params = torch.ones_like(attn_weights, requires_grad=True)
+        else:
+            self.params.data = torch.ones_like(attn_weights)
+        return attn_weights * self.params
+
+    @property
+    def grad(self):
+        return self.params.grad
+
+    def zero_grad(self, set_to_none=True) -> None:
+        # if self.params.grad is not None:
+        #     if set_to_none:
+        #         self.params.grad = None
+        #     else:
+        #         self.params.grad = torch.zeros_like(self.params.grad)
+        if set_to_none:
+            self.params = None
+
+
 class QWenAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -144,6 +190,11 @@ class QWenAttention(nn.Module):
         self.logn_tensor = torch.tensor(logn_list)[None, :, None, None]
 
         self.attn_dropout = nn.Dropout(config.attn_dropout_prob)
+
+        self.scaling_factor = 2
+        self.scaling_factor2 = 1
+
+
 
     def _attn(self, query, key, value, registered_causal_mask, attention_mask=None, head_mask=None):
         attn_weights = torch.matmul(query, key.transpose(-1, -2))
@@ -301,7 +352,6 @@ class QWenAttention(nn.Module):
         else:
             assert position_ids[0, image_token_end] - position_ids[0, image_token_start] == image_token_end - image_token_start
             position_ids = position_ids * self.scaling_factor
-            # import pdb;pdb.set_trace()
             position_ids[:, image_token_end :] = position_ids[:, image_token_end :] -  (self.scaling_factor - 1) * (image_token_end - image_token_start) 
             position_ids[:, image_token_start:image_token_end] =  origin_position_ids[:, image_token_start:image_token_end] + (self.scaling_factor- 1) * origin_position_ids[:, image_token_start]
         
@@ -331,45 +381,11 @@ class QWenAttention(nn.Module):
             thres = mean
 
         mask = (saliency > thres).float()
-        mask2 = (saliency.mean(dim=(1,2), keepdim = True) < thres + 2 * std).float()
-        # keys_norm = torch.norm(keys, dim = -1)
-        # keys_mean = torch.mean(keys_norm )
-        # keys_std = torch.std(keys_norm)
-        # # import pdb;pdb.set_trace()
-        # mask2 = (keys_norm >  keys_mean - 4 * keys_std).unsqueeze(2)
-        mask = mask * mask2
-        # import pdb;pdb.set_trace()
+
+        mask = mask 
         return mask, mean, std 
     
-    # def _GMM_mask(self, saliency, trim = False, head_wise = False, token_wise = False, high_thres = False):
-    #     # data = saliency.cpu().numpy()
-    #     data = saliency
-    #     if trim:
-    #         lower_triangular = torch.tril(data)
-    #         mean = torch.mean(lower_triangular[lower_triangular != 0])
-    
-    #         std = torch.std(lower_triangular[lower_triangular != 0])
-    #     else:
-    #         if head_wise:
-    #             mean = torch.mean(data, dim = (0, 2, 3), keepdim = True)
-    #             std = torch.std(data, dim = (0, 2, 3), keepdim = True)
-    #         elif token_wise:
-    #             mean = torch.mean(data, dim = (0, 1, 3), keepdim = True)
-    #             std = torch.std(data, dim = (0, 1, 3), keepdim = True)          
-    #         else:
-    #             mean = torch.mean(data)
-    #             std = torch.std(data)
-    #     if high_thres:
-    #         thres = mean + 2 * std 
-    #     else:
-    #         thres = mean 
-    #     # import pdb;pdb.set_trace()
-       
-    #     mask = (saliency > thres).float()
-        
-    #     mask2 = (saliency.mean(dim=(1,2), keepdim = True) < thres + 2 * std).float()
-    #     mask = mask * mask2
-    #     return mask, mean, std
+
     
     def _estimate_attention_without_pos(self, query_states, key_states, attention_mask = None):
         if self.use_logn_attn and not self.training:
@@ -444,6 +460,7 @@ class QWenAttention(nn.Module):
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
         rotary_pos_emb: Optional[List[torch.Tensor]] = None,
+        rotary_pos_emb_scaled: Optional[List[torch.Tensor]] = None,
         registered_causal_mask: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
@@ -452,8 +469,17 @@ class QWenAttention(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
+        past_attns: Optional[torch.FloatTensor] = None,
+        layer_idx: Optional[int] = -1,
+        gamma: Optional[float] = None,
+        adaptive_mask=False,
+        position_ids=None,
+        key_pos=None,
+        modi_pos=False,
+        low_angle=False,
+        layer_past_without_pos=None,
+        accel: Optional[bool] = True, 
     ):
-
         mixed_x_layer = self.c_attn(hidden_states)
 
         query, key, value = mixed_x_layer.split(self.split_size, dim=2)
@@ -465,24 +491,11 @@ class QWenAttention(nn.Module):
         
         if rotary_pos_emb is not None:
             cur_len = query.shape[1]
-            rotary_pos_emb = [i[:, -cur_len:, :, :] for i in rotary_pos_emb]
+            ## # disable this and obtain the pos embd with position_ids
+            # rotary_pos_emb = [i[:, -cur_len:, :, :] for i in rotary_pos_emb]  
             rotary_pos_emb = (rotary_pos_emb,) * 2
             q_pos_emb, k_pos_emb = rotary_pos_emb
-            # Slice the pos emb for current inference
-            query = apply_rotary_pos_emb(query, q_pos_emb)
-            key = apply_rotary_pos_emb(key, k_pos_emb)
 
-<<<<<<< HEAD
-        if layer_past is not None:
-            past_key, past_value = layer_past[0], layer_past[1]
-            key = torch.cat((past_key, key), dim=1)
-            value = torch.cat((past_value, value), dim=1)
-
-        if use_cache:
-            present = (key, value)
-        else:
-            present = None
-=======
             rotary_pos_emb_scaled = (rotary_pos_emb_scaled,) * 2
             q_pos_emb_scaled, k_pos_emb_scaled = rotary_pos_emb_scaled
             
@@ -495,9 +508,7 @@ class QWenAttention(nn.Module):
                     import pdb;pdb.set_trace()  
                 if low_angle:
                     tmp_position_ids = self._modi_pos_low_angle(position_ids.clone(), key_pos, use_past = layer_past is not None)
-                    #tmp_position_ids = self._modi_pos2(position_ids.clone(), key_pos, use_past = layer_past is not None)
-                    # tmp_position_ids =  position_ids.clone()
-                    # import pdb;pdb.set_trace()
+
                     tmp_query_states = apply_rotary_pos_emb(query.clone(), q_pos_emb_scaled, tmp_position_ids)
                     tmp_key_states = apply_rotary_pos_emb(key.clone(), k_pos_emb_scaled, tmp_position_ids)
 
@@ -515,7 +526,6 @@ class QWenAttention(nn.Module):
                     if layer_past is None:
                         tmp_query_states2 = tmp_query_states[:, image_token_end+1:]
                     else:
-                        # import pdb;pdb.set_trace()
                         tmp_query_states2 = tmp_query_states
                     attn_weights_with_modi_pos = self._estimate_attention_without_pos(tmp_query_states2, tmp_image_key_states)
                 else:
@@ -548,7 +558,6 @@ class QWenAttention(nn.Module):
         present = (key.permute(0, 2, 1, 3), value.permute(0, 2, 1, 3)) if use_cache else None   # (bsz, num_head, seq_len, num_dim) cache
         if modi_pos:
             present_without_pos = (tmp_key_states.permute(0, 2, 1, 3), value.permute(0, 2, 1, 3)) if use_cache else None
->>>>>>> 11d7567... update
 
         if self.use_logn_attn and not self.training:
             if self.logn_tensor.device != query.device or self.logn_tensor.dtype != query.dtype:
@@ -561,11 +570,6 @@ class QWenAttention(nn.Module):
         query = query.permute(0, 2, 1, 3)
         key = key.permute(0, 2, 1, 3)
         value = value.permute(0, 2, 1, 3)
-<<<<<<< HEAD
-        attn_output, attn_weight = self._attn(
-            query, key, value, registered_causal_mask, attention_mask, head_mask
-        )
-=======
 
         # TODO: add the logical about the IMCCD
         # here we copy the function of `_attn` and modify the
@@ -676,7 +680,6 @@ class QWenAttention(nn.Module):
 
         # ---------- IMCCD part -------------#
 
->>>>>>> 11d7567... update
         context_layer = self._merge_heads(
             attn_output, self.num_heads, self.head_dim
         )
@@ -684,8 +687,15 @@ class QWenAttention(nn.Module):
         attn_output = self.c_proj(context_layer)
 
         outputs = (attn_output, present)
+
+        if not output_attentions:
+            attn_weights = None
+        
+        if modi_pos:
+            outputs += (present_without_pos,)
+       
         if output_attentions:
-            outputs += (attn_weight,)
+            outputs += (attn_weights_all,)
 
         return outputs
 
@@ -731,6 +741,7 @@ class QWenBlock(nn.Module):
         self,
         hidden_states: Optional[Tuple[torch.FloatTensor]],
         rotary_pos_emb: Optional[List[torch.Tensor]] = None,
+        rotary_pos_emb_scaled: Optional[List[torch.Tensor]] = None,
         registered_causal_mask: Optional[torch.Tensor] = None,
         layer_past: Optional[Tuple[torch.Tensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
@@ -739,17 +750,36 @@ class QWenBlock(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = False,
         output_attentions: Optional[bool] = False,
+        past_attns: Optional[torch.FloatTensor] = None,
+        layer_idx: Optional[int] = -1,
+        gamma: Optional[float] = None,
+        adaptive_mask=False,
+        key_pos=None,
+        modi_pos=False,
+        low_angle=False,
+        position_ids=None,
+        layer_past_without_pos=None,
     ):
         layernorm_output = self.ln_1(hidden_states)
         attn_outputs = self.attn(
             layernorm_output,
             rotary_pos_emb,
+            rotary_pos_emb_scaled=rotary_pos_emb_scaled,
             registered_causal_mask=registered_causal_mask,
             layer_past=layer_past,
             attention_mask=attention_mask,
             head_mask=head_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            key_pos=key_pos,
+            modi_pos=modi_pos,
+            low_angle=low_angle,
+            past_attns=past_attns,
+            position_ids=position_ids,
+            layer_idx=layer_idx,
+            gamma=gamma,
+            adaptive_mask=adaptive_mask,
+            layer_past_without_pos=layer_past_without_pos
         )
         attn_output = attn_outputs[0]
 
@@ -767,7 +797,7 @@ class QWenBlock(nn.Module):
         if use_cache:
             outputs = (hidden_states,) + outputs
         else:
-            outputs = (hidden_states,) + outputs[1:]
+            outputs = (hidden_states,) + outputs[2:] if (modi_pos) else (hidden_states,) + outputs[1:] 
 
         return outputs
 
@@ -839,7 +869,11 @@ class QWenModel(QWenPreTrainedModel):
             if self.rotary_ndims is not None
             else config.kv_channels
         )
+        self.scaling_factor = 3
         self.rotary_emb = RotaryEmbedding(dim, base=config.rotary_emb_base)
+        self.rotary_emb_scaled = ScalingRotaryEmbedding(dim, base=config.rotary_emb_base, scaling_factor=self.scaling_factor)
+
+
 
         self.use_flash_attn = config.use_flash_attn
         self.is_fp32 = not (config.bf16 or config.fp16)
@@ -912,6 +946,7 @@ class QWenModel(QWenPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        past_key_values_without_pos: Optional[List[torch.FloatTensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         token_type_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -924,7 +959,14 @@ class QWenModel(QWenPreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         images_tensor=None,
+        modi_pos=False,
+        key_pos=None,
+        low_angle: Optional[bool] = True,
+        past_attns: Optional[torch.FloatTensor] = None,
+        gamma: Optional[float] = None,
+        adaptive_mask: Optional[bool] = False,
     ):
+        # import pdb;pdb.set_trace()
         if past_key_values is None and torch.any(input_ids == self.config.visual['image_start_id']):
             bos_pos = torch.where(input_ids == self.config.visual['image_start_id'])
             eos_pos = torch.where(input_ids == self.config.visual['image_start_id'] + 1)
@@ -932,7 +974,7 @@ class QWenModel(QWenPreTrainedModel):
             img_pos = torch.stack((bos_pos[0], bos_pos[1], eos_pos[1]), dim=1)
             images = []
             for i, a, b in img_pos:
-                image = input_ids[i][a + 1 : b - 1].tolist()
+                image = input_ids[i][a + 1 : b - 1].tolist()    # only include the image file path str and the padding id
                 image = image[ : image.index(self.config.visual['image_start_id'] + 2)]
                 images.append(bytes(image).decode('utf-8'))
             if images_tensor is not None:
@@ -1016,8 +1058,8 @@ class QWenModel(QWenPreTrainedModel):
 
         kv_seq_len = hidden_states.size()[1]
         if past_key_values[0] is not None:
-            # past key values[0][0] shape: bs * seq_len * head_num * dim
-            kv_seq_len += past_key_values[0][0].shape[1]
+            # past key values[0][0] shape: bs * head_num * seq_len * dim
+            kv_seq_len += past_key_values[0][0].size(-2)
         if (
             self.use_dynamic_ntk
             and kv_seq_len == hidden_states.size()[1]
@@ -1029,9 +1071,13 @@ class QWenModel(QWenPreTrainedModel):
         else:
             ntk_alpha = self.rotary_emb._ntk_alpha_cached
 
-        rotary_pos_emb = self.rotary_emb(kv_seq_len, ntk_alpha=ntk_alpha)
+        rotary_pos_emb = self.rotary_emb(kv_seq_len * self.scaling_factor, ntk_alpha=ntk_alpha)
         for idx in range(len(rotary_pos_emb)):
             rotary_pos_emb[idx] = rotary_pos_emb[idx].to(hidden_states.device)
+
+        rotary_pos_emb_scaled = self.rotary_emb_scaled(kv_seq_len * self.scaling_factor, ntk_alpha=ntk_alpha)
+        for idx in range(len(rotary_pos_emb_scaled)):
+            rotary_pos_emb_scaled[idx] = rotary_pos_emb_scaled[idx].to(hidden_states.device)
 
         hidden_states = self.drop(hidden_states).clone()
         if fake_images is not None:
@@ -1049,6 +1095,8 @@ class QWenModel(QWenPreTrainedModel):
                 use_cache = False
 
         presents = () if use_cache else None
+        presents_without_pos = () if use_cache else None
+
         all_self_attentions = () if output_attentions else None
         all_hidden_states = () if output_hidden_states else None
         for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
@@ -1056,15 +1104,12 @@ class QWenModel(QWenPreTrainedModel):
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-<<<<<<< HEAD
-=======
             if layer_past is not None and i < len(past_key_values_without_pos):
                 
                 layer_past_without_pos = past_key_values_without_pos[i] 
             else:
                 layer_past_without_pos = None                
 
->>>>>>> 11d7567... update
             if self.gradient_checkpointing and self.training:
 
                 def create_custom_forward(module):
@@ -1086,16 +1131,14 @@ class QWenModel(QWenPreTrainedModel):
                     encoder_attention_mask,
                 )
             else:
-<<<<<<< HEAD
-=======
                 if not low_angle and i > 5:
                     modi_pos = False
 
->>>>>>> 11d7567... update
                 outputs = block(
                     hidden_states,
                     layer_past=layer_past,
                     rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_emb_scaled=rotary_pos_emb_scaled,
                     registered_causal_mask=self.registered_causal_mask,
                     attention_mask=attention_mask,
                     head_mask=head_mask[i],
@@ -1103,6 +1146,15 @@ class QWenModel(QWenPreTrainedModel):
                     encoder_attention_mask=encoder_attention_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
+                    adaptive_mask=adaptive_mask,
+                    key_pos=key_pos,
+                    modi_pos=modi_pos,
+                    low_angle=low_angle,
+                    position_ids=position_ids,
+                    layer_past_without_pos=layer_past_without_pos,
+                    gamma=gamma,
+                    past_attns=past_attns,
+                    layer_idx=i
                 )
 
             hidden_states = outputs[0]
@@ -1110,22 +1162,29 @@ class QWenModel(QWenPreTrainedModel):
                 presents = presents + (outputs[1],)
 
             if output_attentions:
-                all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+                all_self_attentions = all_self_attentions + (outputs[-1],)
+
+            if modi_pos:
+                presents_without_pos += (outputs[2],)
 
         hidden_states = self.ln_f(hidden_states)
         hidden_states = hidden_states.view(output_shape)
+        
         # Add last hidden state
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
+        next_cache = presents if use_cache else None
+        next_cache_without_pos = presents_without_pos if use_cache else None
         if not return_dict:
             return tuple(
                 v for v in [hidden_states, presents, all_hidden_states] if v is not None
             )
 
-        return BaseModelOutputWithPast(
+        return BaseModelOutputWithPastIMCCD(
             last_hidden_state=hidden_states,
-            past_key_values=presents,
+            past_key_values=next_cache,
+            past_key_values_without_pos=next_cache_without_pos,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
         )
@@ -1187,26 +1246,23 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         self.lm_head = new_embeddings
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs
-    ):
+        self, input_ids, past_key_values=None, past_key_values_without_pos=None, inputs_embeds=None, key_pos = [], use_mask = False,  use_kvcache = False, mask_mode = "", **kwargs
+    ):  
+        if not use_kvcache or (use_mask and (mask_mode == 'gradient' or mask_mode == "adaptive_distribution_gradient" )): #or mask_mode == "adaptive_pos"
+            past_key_values = None
+            past_key_values_without_pos=None
+    
         token_type_ids = kwargs.get("token_type_ids", None)
         if past_key_values:
-            input_ids = input_ids[:, -1].unsqueeze(-1)
+            input_ids = input_ids[:, -1:]
             if token_type_ids is not None:
-                token_type_ids = token_type_ids[:, -1].unsqueeze(-1)
+                token_type_ids = token_type_ids[:, -1:]
 
         attention_mask = kwargs.get("attention_mask", None)
-        position_ids = kwargs.get("position_ids", None)
 
-        if attention_mask is not None and position_ids is None:
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -1].unsqueeze(-1)
+        if inputs_embeds is not None and past_key_values is None:
+            model_inputs = {"inputs_embeds": inputs_embeds}
         else:
-<<<<<<< HEAD
-            position_ids = None
-=======
             model_inputs = {"input_ids": input_ids}
 
         model_inputs.update(
@@ -1225,6 +1281,7 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         self, input_ids, past_num=1, past_key_values=None, past_key_values_without_pos=None, inputs_embeds=None, key_pos_new = [], use_mask = False, use_kvcache = False, **kwargs
     ):  
         if not use_kvcache:
+        
             past_key_values = None
             past_key_values_without_pos = None
 
@@ -1235,7 +1292,6 @@ class QWenLMHeadModel(QWenPreTrainedModel):
                 token_type_ids = token_type_ids[:, -past_num:]
 
         attention_mask = kwargs.get("attention_mask", None)
->>>>>>> 11d7567... update
 
         if inputs_embeds is not None and past_key_values is None:
             model_inputs = {"inputs_embeds": inputs_embeds}
@@ -1245,19 +1301,20 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         model_inputs.update(
             {
                 "past_key_values": past_key_values,
+                "past_key_values_without_pos": past_key_values_without_pos,
                 "use_cache": kwargs.get("use_cache"),
-                "position_ids": position_ids,
                 "attention_mask": attention_mask,
                 "token_type_ids": token_type_ids,
-                "images": kwargs.get("images", None)
+                "images": kwargs.get("images_cd", None),
             }
         )
         return model_inputs
-
+    
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         past_key_values: Optional[Tuple[Tuple[torch.Tensor]]] = None,
+        past_key_values_without_pos: Optional[List[torch.FloatTensor]] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
         token_type_ids: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
@@ -1270,17 +1327,23 @@ class QWenLMHeadModel(QWenPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        past_attns: Optional[torch.FloatTensor] = None,
+        modi_mask: Optional[bool] = False,
         images=None,
         images_cd=None,
         cd_beta=None,
-        cd_alpha=None
+        cd_alpha=None,
+        mask_mode=None,
+        use_mask: Optional[bool] = False,
+        use_kvcache: Optional[bool] = False,
+        modi_pos=False,
+        key_pos=None,
+        gamma=0.2,
+        use_entropy=False
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
-<<<<<<< HEAD
-=======
 
         with torch.no_grad():
             if len(key_pos) == 0:
@@ -1299,11 +1362,11 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             adaptive_mask = True
             tmp_past_attns = past_attns
             modi_pos = modi_pos
->>>>>>> 11d7567... update
 
         transformer_outputs = self.transformer(
             input_ids,
             past_key_values=past_key_values,
+            past_key_values_without_pos = past_key_values_without_pos,
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
@@ -1315,7 +1378,12 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            images_tensor=images
+            images_tensor=images,
+            modi_pos = modi_pos,
+            adaptive_mask = adaptive_mask,
+            past_attns = tmp_past_attns,
+            key_pos=key_pos,
+            gamma=gamma,
         )
         hidden_states = transformer_outputs[0]
 
@@ -1335,14 +1403,15 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithPastIMCCD(
             loss=loss,
             logits=lm_logits,
             past_key_values=transformer_outputs.past_key_values,
+            past_key_values_without_pos=transformer_outputs.past_key_values_without_pos,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            # mask_sum=mask_sum,
         )
-
     @staticmethod
     def _reorder_cache(
         past_key_values: Tuple[Tuple[torch.Tensor]], beam_idx: torch.Tensor
@@ -1524,36 +1593,9 @@ class QWenLMHeadModel(QWenPreTrainedModel):
             **kwargs,
         )
 
-    def prepare_inputs_for_generation_cd(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
-    ):
-        if past_key_values:
-            input_ids = input_ids[:, -1:]
+    
 
-        position_ids = kwargs.get("position_ids", None)
-        if attention_mask is not None and position_ids is None:
-            # create position_ids on the fly for batch generation
-            position_ids = attention_mask.long().cumsum(-1) - 1
-            position_ids.masked_fill_(attention_mask == 0, 1)
-            if past_key_values:
-                position_ids = position_ids[:, -1].unsqueeze(-1)
 
-        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
-        if inputs_embeds is not None and past_key_values is None:
-            model_inputs = {"inputs_embeds": inputs_embeds}
-        else:
-            model_inputs = {"input_ids": input_ids}
-
-        model_inputs.update(
-            {
-                "position_ids": position_ids,
-                "past_key_values": past_key_values,
-                "use_cache": kwargs.get("use_cache"),
-                "attention_mask": attention_mask,
-                "images": kwargs.get("images_cd", None)
-            }
-        )
-        return model_inputs
 class RotaryEmbedding(torch.nn.Module):
     def __init__(self, dim, base=10000):
         super().__init__()
@@ -1594,8 +1636,50 @@ class RotaryEmbedding(torch.nn.Module):
     def forward(self, max_seq_len, offset=0, ntk_alpha=1.0):
         self.update_rotary_pos_emb_cache(max_seq_len, offset, ntk_alpha)
         cos, sin = self._rotary_pos_emb_cache
-        return [cos[:, offset : offset + max_seq_len], sin[:, offset : offset + max_seq_len]]
+        outputs = [cos[:, offset : offset + max_seq_len], sin[:, offset : offset + max_seq_len]]
+     
+        return outputs
 
+
+class ScalingRotaryEmbedding(RotaryEmbedding):
+    def __init__(self, dim, base=10000, scaling_factor=1.0):
+        self.scaling_factor = scaling_factor
+        super().__init__(dim, base)
+        
+    def update_rotary_pos_emb_cache(self, max_seq_len, offset=0, ntk_alpha=1.0):
+        seqlen = max_seq_len + offset
+        if seqlen > self._seq_len_cached or ntk_alpha != self._ntk_alpha_cached:
+            base = self.base * ntk_alpha ** (self.dim / (self.dim - 2))
+            self.inv_freq = 1.0 / (
+                base
+                ** (
+                    torch.arange(0, self.dim, 2, device=self.inv_freq.device).float()
+                    / self.dim
+                )
+            )
+            self._seq_len_cached = max(2 * seqlen, 16)
+            self._ntk_alpha_cached = ntk_alpha
+            seq = torch.arange(self._seq_len_cached, device=self.inv_freq.device)
+            
+            # scaling the position embedding
+            seq = seq / self.scaling_factor
+            
+            freqs = torch.outer(seq.type_as(self.inv_freq), self.inv_freq)
+            
+            emb = torch.cat((freqs, freqs), dim=-1)
+            from einops import rearrange
+
+            emb = rearrange(emb, "n d -> 1 n 1 d")
+
+            cos, sin = emb.cos(), emb.sin()
+            self._rotary_pos_emb_cache = [cos, sin]
+
+    def forward(self, max_seq_len, offset=0, ntk_alpha=1.0):
+        self.update_rotary_pos_emb_cache(max_seq_len, offset, ntk_alpha)
+        cos, sin = self._rotary_pos_emb_cache
+        outputs = [cos[:, offset : offset + max_seq_len], sin[:, offset : offset + max_seq_len]]
+     
+        return outputs
 
 def _rotate_half(x):
     from einops import rearrange
@@ -1605,7 +1689,8 @@ def _rotate_half(x):
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t, freqs):
+def apply_rotary_pos_emb(t, freqs, position_ids=None):
+    # t: (bsz, seq_len, num_head, num_dim)
     cos, sin = freqs
     if apply_rotary_emb_func is not None and t.is_cuda:
         t_ = t.float()
@@ -1616,6 +1701,12 @@ def apply_rotary_pos_emb(t, freqs):
     else:
         rot_dim = freqs[0].shape[-1]
         cos, sin = freqs
+        # TODO: add logical about modifying position embeds
+        if position_ids is not None:
+           index = position_ids.unsqueeze(2).unsqueeze(3).expand(-1, -1, 1, rot_dim)
+           cos = torch.gather(cos, dim=1, index=index)
+           sin = torch.gather(sin, dim=1, index=index)
+
         t_, t_pass_ = t[..., :rot_dim], t[..., rot_dim:]
         t_ = t_.float()
         t_pass_ = t_pass_.float()

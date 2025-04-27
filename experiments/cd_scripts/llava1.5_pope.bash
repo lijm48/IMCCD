@@ -70,6 +70,5 @@ CUDA_VISIBLE_DEVICES=0 python ./eval/object_hallucination_vqa_llava.py \
 --mask_mode  imccd \
 --noise_step $noise_step \
 --seed ${seed} \
---sampling ${sampling} \
---use_kvcache
+--sampling ${sampling} 
 

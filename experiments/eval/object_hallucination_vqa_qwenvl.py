@@ -6,7 +6,9 @@ from tqdm import tqdm
 import shortuuid
 import sys
 import os
+# sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from llava.utils import disable_torch_init
 from llava.mm_utils import tokenizer_image_token, get_model_name_from_path, KeywordsStoppingCriteria
 from PIL import Image
@@ -46,9 +48,15 @@ def eval_model(args):
         question = '<img>{}</img>{} Answer:'.format(image_path, question)
         questions_id = []
         input_ids = tokenizer([question], return_tensors='pt', padding='longest')
+        len_input_ids = input_ids.input_ids.shape[1]
 
+        _, bos_pos_ind = torch.where(input_ids.input_ids == model.config.visual['image_start_id'])
+        _, eos_pos_ind = torch.where(input_ids.input_ids == model.config.visual['image_start_id'] + 1)
+        
         image_tensor = Image.open(image_path).convert("RGB")
         image_tensor = model.transformer.visual.image_transform(image_tensor).unsqueeze(0).to(model.device)
+
+        key_pos = [{"image_token_start": bos_pos_ind.cuda() + 1,  "image_token_end": eos_pos_ind.cuda() - len_input_ids,}]
 
         if args.use_cd:
             image_tensor_cd = add_diffusion_noise(image_tensor, args.noise_step)
@@ -120,17 +128,17 @@ if __name__ == "__main__":
 
     parser.add_argument("--noise_step", type=int, default=500)
     parser.add_argument("--use_cd", action='store_true', default=False)
+    parser.add_argument("--use_icd", action='store_true', default=False)
+    parser.add_argument("--use_mask", action='store_true', default=False)
+    parser.add_argument("--mask_mode", type=str, default="gradient")
     parser.add_argument("--cd_alpha", type=float, default=1)
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
-<<<<<<< HEAD
-=======
     parser.add_argument("--gamma", type=float, default=0.2)
     parser.add_argument("--sampling", type=str, default='sample')
     parser.add_argument("--num_beams", type=int, default=1)
     parser.add_argument("--use_kvcache", action='store_true', default=False)
     
->>>>>>> 11d7567... update
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

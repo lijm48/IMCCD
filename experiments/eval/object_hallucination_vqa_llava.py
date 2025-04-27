@@ -27,6 +27,7 @@ evolve_vcd_sampling()
 
 def eval_model(args):
     # Model
+    # import pdb;pdb.set_trace()
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
     model_name = get_model_name_from_path(model_path)
@@ -36,8 +37,8 @@ def eval_model(args):
     answers_file = os.path.expanduser(args.answers_file)
     os.makedirs(os.path.dirname(answers_file), exist_ok=True)
     ans_file = open(answers_file, "w")
+    cnt = 0     # record the processed sample
     for line in tqdm(questions):
-        # import pdb; pdb.set_trace()
         idx = line["question_id"]
         image_file = line["image"]
         qs = line["text"]
@@ -94,15 +95,14 @@ def eval_model(args):
         else:
             a_indices = there_indices.squeeze()
         key_pos = [{"image_token_start": image_token_indices,  "image_token_end": image_token_indices + 1 - len_input_ids, "key_qusetion_token_end": -15, "a": a_indices + 576 , "in": in_indices +576, "is": is_indices + 576}]
-
+        
         with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
+            generate_args = dict(
+                inputs=input_ids,
                 images=image_tensor.unsqueeze(0).half().cuda(),
                 images_cd=(image_tensor_cd.unsqueeze(0).half().cuda() if image_tensor_cd is not None else None),
                 cd_alpha = args.cd_alpha,
                 cd_beta = args.cd_beta,
-                do_sample=True,
                 temperature=args.temperature,
                 top_p=args.top_p,
                 top_k=args.top_k,
@@ -113,7 +113,18 @@ def eval_model(args):
                 key_pos =key_pos,
                 qs = line["text"],
                 label = label,
-                input_ids_cd = input_ids_cd if args.use_icd else None)
+                input_ids_cd = input_ids_cd if args.use_icd else None,
+                sample_id=cnt
+            )
+            if args.sampling == 'sample':
+                generate_args.update(do_sample=True)
+            elif args.sampling == 'greedy_search':
+                assert args.num_beams == 1, 'greedy search must use num_beams=1!'
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
+            elif args.sampling == 'beam_search':
+                generate_args.update(do_sample=False, num_beams=args.num_beams)
+
+            output_ids = model.generate(**generate_args)
 
         input_token_len = input_ids.shape[1]
         n_diff_input_output = (input_ids != output_ids[:, :input_token_len]).sum().item()
@@ -132,6 +143,7 @@ def eval_model(args):
                                    "image": image_file,
                                    "metadata": {}}) + "\n")
         ans_file.flush()
+        cnt += 1
     ans_file.close()
 
 if __name__ == "__main__":
@@ -157,6 +169,10 @@ if __name__ == "__main__":
     parser.add_argument("--cd_beta", type=float, default=0.1)
     parser.add_argument("--gamma", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--sampling", type=str, default='sample')
+    parser.add_argument("--num_beams", type=int, default=1)
+
+
     args = parser.parse_args()
     set_seed(args.seed)
     eval_model(args)

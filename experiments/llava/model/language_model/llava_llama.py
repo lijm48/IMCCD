@@ -99,16 +99,13 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        # import pdb;pdb.set_trace()
         mask_sum = torch.zeros(1).to( images.device)
         with torch.no_grad():
-            # import pdb;pdb.set_trace()
             input_ids, attention_mask, past_key_values, inputs_embeds, labels, tmp_key_pos = self.prepare_inputs_labels_for_multimodal(input_ids, attention_mask, past_key_values, labels, images)
             if len(key_pos) == 0:
                 key_pos = tmp_key_pos
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        # import pdb;pdb.set_trace()
         adaptive_mask = False
         tmp_past_attns = None
         if mask_mode == "ved":
@@ -118,7 +115,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             adaptive_mask = True
             tmp_past_attns = past_attns
             modi_pos = modi_pos
-        # import pdb;pdb.set_trace()
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -200,7 +196,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         # if use_mask:
         #     past_key_values = None
         if past_key_values:
-            # import pdb;pdb.set_trace()
             input_ids = input_ids[:, -past_num:]
             # attention_mask = attention_mask[:, -past_num:]
 
@@ -232,9 +227,6 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             import pdb;pdb.set_trace()
         # 
         saliency = saliency / (saliency[image_token_start:image_token_end].sum(dim=0) + 1e-7)
-        # if self.cnt == 5:
-        #     import pdb;pdb.set_trace()
-        # saliency_mask = (saliency[image_token_start:image_token_end] < 0.002).float()
         saliency_mask = self.GMM_mask(saliency[image_token_start:image_token_end])
         mask_sum = saliency_mask.shape[0] - saliency_mask.sum()
         attention_mask[0, image_token_start:image_token_end] = attention_mask[0, image_token_start:image_token_end] * saliency_mask 
