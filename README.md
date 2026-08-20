@@ -1,4 +1,7 @@
 # IMCCD
+The official code for our paper ["Mitigating Hallucination for Large Vision Language Model by Inter-Modality Correlation Calibration Decoding"](https://arxiv.org/abs/2501.01926v1).
+
+We will update the code for the advanced version of IMCCD, our CVPR paper ["Cross-Modal Attention Calibration for LVLM Hallucination Mitigation"](https://openaccess.thecvf.com/content/CVPR2026/papers/Li_Cross-Modal_Attention_Calibration_for_LVLM_Hallucination_Mitigation_CVPR_2026_paper.pdf) soon.
 
 ## 🕹️ Usage
 ### Environment Setup
